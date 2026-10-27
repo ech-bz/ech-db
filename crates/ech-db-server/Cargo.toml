@@ -1,0 +1,26 @@
+[package]
+name = "ech-db-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ech-db-server"
+path = "src/main.rs"
+
+[dependencies]
+ech-db-protocol = { path = "../ech-db-protocol" }
+foundationdb.workspace = true
+foundationdb-tuple.workspace = true
+futures.workspace = true
+wasmi.workspace = true
+wasmi_core.workspace = true
+bcs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+axum.workspace = true
+clap.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ed25519-dalek.workspace = true

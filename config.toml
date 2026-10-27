@@ -1,0 +1,4 @@
+listen = "0.0.0.0:8080"
+
+[fdb]
+cluster-file = "/etc/fdb/fdb.cluster"
