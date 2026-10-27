@@ -1,6 +1,5 @@
 pub mod abi;
 pub mod append;
-pub mod config;
 pub mod error;
 pub mod exec;
 pub mod fdb;

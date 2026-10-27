@@ -7,7 +7,6 @@ use serde::Serialize;
 
 use ech_db_protocol::error::Reject;
 
-use crate::config::FdbConfig;
 use crate::error::DbError;
 
 pub type Row = (Vec<u8>, Vec<u8>);
@@ -57,9 +56,9 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(config: &FdbConfig) -> Result<Self, FdbError> {
+    pub fn open(cluster_file: &str) -> Result<Self, FdbError> {
         Ok(Self {
-            database: Database::new(Some(&config.cluster_file))?,
+            database: Database::new(Some(cluster_file))?,
         })
     }
 
