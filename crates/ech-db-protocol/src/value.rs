@@ -5,23 +5,6 @@ use crate::error::{CodecError, SignError};
 use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Ctx {
-    pub public: Vec<u8>,
-    pub private: Vec<u8>,
-    pub commitment: [u8; 32],
-}
-
-impl Ctx {
-    pub fn commitment(private: &[u8]) -> [u8; 32] {
-        Blake2b256::hash(&[private])
-    }
-
-    pub fn verify(&self, private: &[u8]) -> bool {
-        self.commitment == Self::commitment(private)
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Program {
     Txid(Txid),
@@ -31,7 +14,7 @@ pub enum Program {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Call {
     pub program: Program,
-    pub ctx: Ctx,
+    pub ctx: Vec<u8>,
     pub function: String,
     pub args: Vec<u8>,
 }

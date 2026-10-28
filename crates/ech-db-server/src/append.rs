@@ -43,9 +43,6 @@ impl Server {
         if !request.tx.verify(root) {
             return Err(DbError::reject(Reject::BadSignature));
         }
-        if !request.tx.call.ctx.verify(&request.private) {
-            return Err(DbError::reject(Reject::Commitment));
-        }
         let txid = request
             .tx
             .call

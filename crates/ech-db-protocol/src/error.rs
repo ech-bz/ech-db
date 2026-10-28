@@ -20,7 +20,6 @@ pub struct HexError;
 pub enum Reject {
     BadRequest,
     BadSignature,
-    Commitment,
     Duplicate,
     NotFound,
     ProgramNotFound,
