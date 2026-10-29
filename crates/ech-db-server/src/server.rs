@@ -38,7 +38,7 @@ impl Server {
         txid: &Txid,
         request: &Request,
     ) -> Result<Vec<u8>, DbError> {
-        match request.tx.call.program {
+        match request.tx.submission.call.program {
             Program::Txid(program) => {
                 let module = self.programs.module(access, root, &program).await?;
                 self.executor.run(access, &module, root, request).await

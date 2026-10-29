@@ -1,7 +1,7 @@
 use curve25519_dalek::RistrettoPoint;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{Curve, Hs, Kdf};
+use crate::crypto::{Curve, Hs};
 use crate::error::{CodecError, Reject};
 use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
@@ -12,28 +12,6 @@ pub struct Identity {
     pub nonce: [u8; 32],
     pub c1: [u8; 32],
     pub c2: [u8; 32],
-}
-
-impl Identity {
-    pub fn derive(
-        secret: &[u8; 32],
-        root: &Root,
-        tweak: [u8; 32],
-        nonce: [u8; 32],
-    ) -> Option<Self> {
-        let anchor = Curve::point(root.as_array())?;
-        let x = Kdf::scalar(secret, b"identity", root.as_bytes());
-        let input = bcs::to_bytes(&(root, tweak)).ok()?;
-        let r = Kdf::scalar(secret, b"encryption", &input);
-        let c1 = Curve::base() * r;
-        let c2 = Curve::base() * x + anchor * r;
-        Some(Self {
-            tweak,
-            nonce,
-            c1: Curve::encode(&c1),
-            c2: Curve::encode(&c2),
-        })
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,19 +49,12 @@ pub struct User {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Admission {
-    pub k: [u8; 32],
-    pub sa: [u8; 32],
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Tx {
+pub struct Submission {
     pub call: Call,
     pub user: Option<User>,
-    pub admission: Admission,
 }
 
-impl Tx {
+impl Submission {
     pub fn txid(&self, root: &Root) -> Result<Txid, CodecError> {
         let identity = self.user.as_ref().map(|user| &user.identity);
         let bytes = bcs::to_bytes(&(root, &self.call, identity)).map_err(CodecError::from)?;
@@ -95,15 +66,14 @@ impl Tx {
         if let Some(user) = &self.user {
             self.verify_user(root, &anchor, user)?;
         }
-        let k = Curve::point(&self.admission.k).ok_or(Reject::BadSignature)?;
-        let sa = Curve::scalar(&self.admission.sa).ok_or(Reject::BadSignature)?;
-        let payload = bcs::to_bytes(&(root, self.admission.k, &self.call, &self.user))
-            .map_err(|_| Reject::BadRequest)?;
-        let challenge = Hs::scalar(b"admission", &payload);
-        if sa * Curve::base() != k + challenge * anchor {
-            return Err(Reject::BadSignature);
-        }
         Ok(())
+    }
+
+    pub fn admit(self, admission: Admission) -> Tx {
+        Tx {
+            submission: self,
+            admission,
+        }
     }
 
     fn verify_user(&self, root: &Root, anchor: &RistrettoPoint, user: &User) -> Result<(), Reject> {
@@ -142,6 +112,43 @@ impl Tx {
             return Err(Reject::BadSignature);
         }
         Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Admission {
+    pub k: [u8; 32],
+    pub sa: [u8; 32],
+}
+
+impl Admission {
+    pub fn verify(&self, root: &Root, submission: &Submission) -> Result<(), Reject> {
+        let anchor = Curve::point(root.as_array()).ok_or(Reject::BadRequest)?;
+        let k = Curve::point(&self.k).ok_or(Reject::BadSignature)?;
+        let sa = Curve::scalar(&self.sa).ok_or(Reject::BadSignature)?;
+        let payload = bcs::to_bytes(&(root, self.k, submission)).map_err(|_| Reject::BadRequest)?;
+        let challenge = Hs::scalar(b"admission", &payload);
+        if sa * Curve::base() != k + challenge * anchor {
+            return Err(Reject::BadSignature);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Tx {
+    pub submission: Submission,
+    pub admission: Admission,
+}
+
+impl Tx {
+    pub fn txid(&self, root: &Root) -> Result<Txid, CodecError> {
+        self.submission.txid(root)
+    }
+
+    pub fn verify(&self, root: &Root) -> Result<(), Reject> {
+        self.submission.verify(root)?;
+        self.admission.verify(root, &self.submission)
     }
 }
 

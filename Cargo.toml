@@ -4,6 +4,7 @@ members = [
     "crates/ech-db-protocol",
     "crates/ech-db-guest",
     "crates/ech-db-server",
+    "crates/ech-db-sdk",
 ]
 
 [workspace.package]
@@ -19,6 +20,7 @@ foundationdb = { version = "0.11.0", default-features = false, features = ["fdb-
 blake2b_simd = "1.0.5"
 curve25519-dalek = "5.0.0"
 hex = "0.4"
+getrandom = "0.3"
 wasmi = { version = "2.0.0", features = ["deterministic"] }
 wasmi_core = "2.0.0"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }

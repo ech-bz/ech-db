@@ -1,0 +1,11 @@
+[package]
+name = "ech-db-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ech-db-protocol = { path = "../ech-db-protocol" }
+bcs.workspace = true
+blake2b_simd.workspace = true
+curve25519-dalek.workspace = true
+getrandom.workspace = true

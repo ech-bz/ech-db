@@ -46,17 +46,3 @@ impl Hs {
         Curve::reduce(state.finalize().as_bytes())
     }
 }
-
-pub struct Kdf;
-
-impl Kdf {
-    pub fn scalar(secret: &[u8; 32], domain: &[u8], info: &[u8]) -> Scalar {
-        let mut state = Params::new()
-            .hash_length(Curve::WIDE)
-            .key(secret)
-            .to_state();
-        state.update(domain);
-        state.update(info);
-        Curve::reduce(state.finalize().as_bytes())
-    }
-}
