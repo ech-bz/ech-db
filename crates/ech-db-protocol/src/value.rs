@@ -6,10 +6,9 @@ use crate::error::{CodecError, Reject};
 use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Identity {
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Esid {
     pub tweak: [u8; 32],
-    pub nonce: [u8; 32],
     pub c1: [u8; 32],
     pub c2: [u8; 32],
 }
@@ -34,17 +33,27 @@ impl Call {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct UserProof {
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Commitment {
     pub t1: [u8; 32],
     pub t2: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Response {
     pub zx: [u8; 32],
     pub zr: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct UserProof {
+    pub commitment: Commitment,
+    pub response: Response,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct User {
-    pub identity: Identity,
+    pub esid: Esid,
     pub proof: UserProof,
 }
 
@@ -56,8 +65,7 @@ pub struct Submission {
 
 impl Submission {
     pub fn txid(&self, root: &Root) -> Result<Txid, CodecError> {
-        let identity = self.user.as_ref().map(|user| &user.identity);
-        let bytes = bcs::to_bytes(&(root, &self.call, identity)).map_err(CodecError::from)?;
+        let bytes = bcs::to_bytes(&(root, &self.call, &self.user)).map_err(CodecError::from)?;
         Ok(Txid::new(Blake2b256::hash(&[bytes.as_slice()])))
     }
 
@@ -78,32 +86,24 @@ impl Submission {
 
     fn verify_user(&self, root: &Root, anchor: &RistrettoPoint, user: &User) -> Result<(), Reject> {
         let base = Curve::base();
-        let identity = &user.identity;
-        let proof = &user.proof;
-        let c1 = Curve::point(&identity.c1).ok_or(Reject::BadSignature)?;
-        let c2 = Curve::point(&identity.c2).ok_or(Reject::BadSignature)?;
+        let esid = &user.esid;
+        let commitment = &user.proof.commitment;
+        let response = &user.proof.response;
+        let c1 = Curve::point(&esid.c1).ok_or(Reject::BadSignature)?;
+        let c2 = Curve::point(&esid.c2).ok_or(Reject::BadSignature)?;
         if c1 == Curve::identity() {
             return Err(Reject::BadSignature);
         }
-        let t1 = Curve::point(&proof.t1).ok_or(Reject::BadSignature)?;
-        let t2 = Curve::point(&proof.t2).ok_or(Reject::BadSignature)?;
-        let zx = Curve::scalar(&proof.zx).ok_or(Reject::BadSignature)?;
-        let zr = Curve::scalar(&proof.zr).ok_or(Reject::BadSignature)?;
+        let t1 = Curve::point(&commitment.t1).ok_or(Reject::BadSignature)?;
+        let t2 = Curve::point(&commitment.t2).ok_or(Reject::BadSignature)?;
+        let zx = Curve::scalar(&response.zx).ok_or(Reject::BadSignature)?;
+        let zr = Curve::scalar(&response.zr).ok_or(Reject::BadSignature)?;
         let message = self
             .call
             .signing_bytes(root)
             .map_err(|_| Reject::BadRequest)?;
-        let payload = bcs::to_bytes(&(
-            root,
-            identity.tweak,
-            identity.nonce,
-            identity.c1,
-            identity.c2,
-            proof.t1,
-            proof.t2,
-            message,
-        ))
-        .map_err(|_| Reject::BadRequest)?;
+        let payload =
+            bcs::to_bytes(&(root, esid, commitment, message)).map_err(|_| Reject::BadRequest)?;
         let challenge = Hs::scalar(b"user", &payload);
         if zr * base != t1 + challenge * c1 {
             return Err(Reject::BadSignature);

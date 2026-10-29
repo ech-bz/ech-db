@@ -5,7 +5,7 @@ use curve25519_dalek::scalar::Scalar;
 
 use ech_db_protocol::crypto::{Curve, Hs};
 use ech_db_protocol::id::Root;
-use ech_db_protocol::value::{Call, Identity, Submission, User, UserProof};
+use ech_db_protocol::value::{Call, Commitment, Esid, Response, Submission, User, UserProof};
 
 pub struct Client([u8; 32]);
 
@@ -23,57 +23,45 @@ impl Client {
         Self::new(bytes)
     }
 
-    pub fn identity(&self, root: &Root, tweak: [u8; 32], nonce: [u8; 32]) -> Option<Identity> {
+    pub fn esid(&self, root: &Root, tweak: [u8; 32]) -> Option<Esid> {
         let anchor = Curve::point(root.as_array())?;
         let (x, r) = self.scalars(root, tweak)?;
         let c1 = Curve::base() * r;
         let c2 = Curve::base() * x + anchor * r;
-        Some(Identity {
+        Some(Esid {
             tweak,
-            nonce,
             c1: Curve::encode(&c1),
             c2: Curve::encode(&c2),
         })
     }
 
-    pub fn submit(
-        &self,
-        root: &Root,
-        call: Call,
-        tweak: [u8; 32],
-        nonce: [u8; 32],
-    ) -> Option<Submission> {
+    pub fn submit(&self, root: &Root, call: Call, tweak: [u8; 32]) -> Option<Submission> {
         let anchor = Curve::point(root.as_array())?;
         let (x, r) = self.scalars(root, tweak)?;
-        let identity = self.identity(root, tweak, nonce)?;
+        let esid = self.esid(root, tweak)?;
         let beta = Self::random()?;
         let alpha = Self::random()?;
         let t1 = Curve::base() * beta;
         let t2 = Curve::base() * alpha + anchor * beta;
+        let commitment = Commitment {
+            t1: Curve::encode(&t1),
+            t2: Curve::encode(&t2),
+        };
         let message = call.signing_bytes(root).ok()?;
-        let payload = bcs::to_bytes(&(
-            root,
-            identity.tweak,
-            identity.nonce,
-            identity.c1,
-            identity.c2,
-            Curve::encode(&t1),
-            Curve::encode(&t2),
-            message,
-        ))
-        .ok()?;
+        let payload = bcs::to_bytes(&(root, &esid, &commitment, message)).ok()?;
         let challenge = Hs::scalar(b"user", &payload);
         let zx = alpha + challenge * x;
         let zr = beta + challenge * r;
         Some(Submission {
             call,
             user: Some(User {
-                identity,
+                esid,
                 proof: UserProof {
-                    t1: Curve::encode(&t1),
-                    t2: Curve::encode(&t2),
-                    zx: zx.to_bytes(),
-                    zr: zr.to_bytes(),
+                    commitment,
+                    response: Response {
+                        zx: zx.to_bytes(),
+                        zr: zr.to_bytes(),
+                    },
                 },
             }),
         })
