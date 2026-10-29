@@ -5,7 +5,7 @@ use wasmi::{Engine, Module};
 
 use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
-use ech_db_protocol::value::{Invocation, Program};
+use ech_db_protocol::value::{Program, Request};
 
 use crate::abi::Abi;
 use crate::error::DbError;
@@ -27,9 +27,9 @@ impl Programs {
         }
     }
 
-    pub fn native(&self, txid: &Txid, invocation: &Invocation) -> Result<Vec<u8>, DbError> {
-        match invocation.call.function.as_str() {
-            Self::UPLOAD_PROGRAM => self.upload(txid, &invocation.call.args),
+    pub fn native(&self, txid: &Txid, request: &Request) -> Result<Vec<u8>, DbError> {
+        match request.tx.call.function.as_str() {
+            Self::UPLOAD_PROGRAM => self.upload(txid, &request.tx.call.args),
             function => Err(DbError::reject(Reject::UnknownNative {
                 function: function.to_string(),
             })),

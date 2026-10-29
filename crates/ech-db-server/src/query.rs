@@ -24,12 +24,9 @@ impl Server {
         root: &Root,
         request: &Request,
     ) -> Result<Outcome, DbError> {
-        if !request.tx.verify(root) {
-            return Err(DbError::reject(Reject::BadSignature));
-        }
+        request.tx.verify(root).map_err(DbError::Reject)?;
         let txid = request
             .tx
-            .call
             .txid(root)
             .map_err(|_| DbError::reject(Reject::BadRequest))?;
         let result = self.execute(view, root, &txid, request).await?;

@@ -3,14 +3,16 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::HexError;
+use crate::crypto::Curve;
+use crate::error::{HexError, RootError};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Root([u8; 32]);
 
 impl Root {
-    pub fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub fn new(bytes: [u8; 32]) -> Option<Self> {
+        Curve::point(&bytes)?;
+        Some(Self(bytes))
     }
 
     pub fn as_array(&self) -> &[u8; 32] {
@@ -23,12 +25,12 @@ impl Root {
 }
 
 impl FromStr for Root {
-    type Err = HexError;
+    type Err = RootError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let bytes = hex::decode(text).map_err(|_| HexError)?;
-        let array: [u8; 32] = bytes.try_into().map_err(|_| HexError)?;
-        Ok(Self(array))
+        let bytes = hex::decode(text).map_err(|_| RootError)?;
+        let array: [u8; 32] = bytes.try_into().map_err(|_| RootError)?;
+        Self::new(array).ok_or(RootError)
     }
 }
 

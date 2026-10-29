@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ech_db_protocol::id::{Root, Txid};
-use ech_db_protocol::value::{Invocation, Program, Request};
+use ech_db_protocol::value::{Program, Request};
 
 use crate::error::DbError;
 use crate::exec::Executor;
@@ -38,17 +38,12 @@ impl Server {
         txid: &Txid,
         request: &Request,
     ) -> Result<Vec<u8>, DbError> {
-        let invocation = Invocation {
-            root: *root,
-            call: request.tx.call.clone(),
-            private: request.private.clone(),
-        };
         match request.tx.call.program {
             Program::Txid(program) => {
                 let module = self.programs.module(access, root, &program).await?;
-                self.executor.run(access, &module, &invocation).await
+                self.executor.run(access, &module, root, request).await
             }
-            Program::Native => self.programs.native(txid, &invocation),
+            Program::Native => self.programs.native(txid, request),
         }
     }
 }

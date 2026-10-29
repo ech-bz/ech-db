@@ -1,8 +1,9 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use ech_db_protocol::id::Root;
 use ech_db_protocol::keys::{Range, ReadKey};
-use ech_db_protocol::value::{CallOutput, Invocation};
+use ech_db_protocol::value::{CallOutput, Request};
 
 #[link(wasm_import_module = "ech")]
 extern "C" {
@@ -89,7 +90,7 @@ fn from_bcs_bytes<T: DeserializeOwned>(bytes: &[u8]) -> T {
     bcs::from_bytes(bytes).expect("bcs decode")
 }
 
-pub fn decode_invocation(bytes: &[u8]) -> Invocation {
+pub fn decode_input(bytes: &[u8]) -> (Root, Request) {
     from_bcs_bytes(bytes)
 }
 

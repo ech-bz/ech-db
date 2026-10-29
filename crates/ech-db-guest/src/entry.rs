@@ -9,18 +9,18 @@ pub fn alloc(len: i32) -> i32 {
 #[cfg(target_arch = "wasm32")]
 use crate::host;
 #[cfg(target_arch = "wasm32")]
-use crate::Invocation;
+use crate::{Request, Root};
 
 #[cfg(target_arch = "wasm32")]
 pub fn call<F>(ptr: i32, len: i32, handler: F) -> i64
 where
-    F: FnOnce(Invocation) -> Result<Vec<u8>, Vec<u8>>,
+    F: FnOnce(Root, Request) -> Result<Vec<u8>, Vec<u8>>,
 {
     let input_bytes = unsafe {
         core::slice::from_raw_parts(ptr as u32 as usize as *const u8, len as u32 as usize)
     };
-    let invocation = host::decode_invocation(input_bytes);
-    let output = match handler(invocation) {
+    let (root, request) = host::decode_input(input_bytes);
+    let output = match handler(root, request) {
         Ok(bytes) => crate::CallOutput::Ok(bytes),
         Err(bytes) => crate::CallOutput::Err(bytes),
     };

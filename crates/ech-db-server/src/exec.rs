@@ -8,7 +8,7 @@ use wasmi::{
 use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::Root;
 use ech_db_protocol::keys::{Range, ReadKey};
-use ech_db_protocol::value::{CallOutput, Invocation};
+use ech_db_protocol::value::{CallOutput, Request};
 
 use crate::error::DbError;
 use crate::fdb::{Mutator, Reader};
@@ -29,7 +29,8 @@ impl Executor {
         &self,
         access: &R,
         module: &Module,
-        input: &Invocation,
+        root: &Root,
+        request: &Request,
     ) -> Result<Vec<u8>, DbError> {
         let mut linker = <Linker<ExecState>>::new(&self.engine);
         linker
@@ -50,7 +51,7 @@ impl Executor {
         linker
             .func_wrap("ech", "abort", Host::abort)
             .map_err(|_| DbError::reject(Reject::Abi))?;
-        let mut store = Store::new(&self.engine, ExecState::new(input.root));
+        let mut store = Store::new(&self.engine, ExecState::new(*root));
         store.limiter(|state| &mut state.limits);
         store
             .set_fuel(Profile::FUEL)
@@ -68,7 +69,7 @@ impl Executor {
         let entry = instance
             .get_typed_func::<(i32, i32), i64>(&store, "ech_call")
             .map_err(|_| DbError::reject(Reject::Abi))?;
-        let payload = to_bytes(input).map_err(|_| DbError::reject(Reject::Abi))?;
+        let payload = to_bytes(&(root, request)).map_err(|_| DbError::reject(Reject::Abi))?;
         let length =
             i32::try_from(payload.len()).map_err(|_| DbError::reject(Reject::ResourceLimit))?;
         store.data_mut().in_alloc = true;

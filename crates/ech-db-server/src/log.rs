@@ -41,7 +41,7 @@ impl Log {
     pub async fn tx<R: Reader>(access: &R, root: &Root, txid: &Txid) -> Result<Tx, DbError> {
         let body = Self::body(access, root, txid).await?;
         let tx: Tx = from_bytes(&body).map_err(|_| DbError::integrity())?;
-        let computed = tx.call.txid(root).map_err(|_| DbError::integrity())?;
+        let computed = tx.txid(root).map_err(|_| DbError::integrity())?;
         if computed != *txid {
             return Err(DbError::integrity());
         }

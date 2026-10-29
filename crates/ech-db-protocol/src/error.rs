@@ -7,14 +7,12 @@ pub enum CodecError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SignError {
-    #[error(transparent)]
-    Codec(#[from] CodecError),
-}
-
-#[derive(Debug, thiserror::Error)]
 #[error("invalid hex encoding")]
 pub struct HexError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid root encoding")]
+pub struct RootError;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum Reject {
