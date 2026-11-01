@@ -10,6 +10,6 @@ pub use ech_db_protocol::id::{Root, Txid};
 pub use ech_db_protocol::keys::{Keys, Namespace, Prefix, Range, ReadKey};
 pub use ech_db_protocol::proof::{Equation, Proof, Statement, Term};
 pub use ech_db_protocol::value::{
-    Author, Call, CallOutput, Esid, Program, Request, ServerPart, Tx, UserPart,
+    Author, Call, CallOutput, Decryption, Esid, Program, Request, ServerPart, Tx, UserPart,
 };
 pub use foundationdb_tuple::{pack, Bytes, Versionstamp};

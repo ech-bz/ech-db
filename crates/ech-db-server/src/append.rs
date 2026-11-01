@@ -40,7 +40,7 @@ impl Server {
         root: &Root,
         request: &Request,
     ) -> Result<Outcome, DbError> {
-        request.tx.verify(root).map_err(DbError::Reject)?;
+        request.verify(root).map_err(DbError::Reject)?;
         let txid = request
             .tx
             .txid(root)

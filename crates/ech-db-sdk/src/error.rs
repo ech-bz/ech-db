@@ -8,6 +8,8 @@ pub enum Error {
     Codec(#[from] CodecError),
     #[error("root is not a point")]
     Root,
+    #[error("esid is not a point")]
+    Esid,
     #[error("proof cannot be built")]
     Proof,
 }

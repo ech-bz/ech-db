@@ -1,9 +1,10 @@
 use curve25519_dalek::scalar::Scalar;
 
 use ech_db_protocol::crypto::Curve;
+use ech_db_protocol::error::CodecError;
 use ech_db_protocol::id::Root;
 use ech_db_protocol::proof::{Proof, Statement};
-use ech_db_protocol::value::{ServerPart, Tx, UserPart};
+use ech_db_protocol::value::{Decryption, Esid, ServerPart, Tx, UserPart};
 
 use crate::Error;
 
@@ -39,6 +40,18 @@ impl Domain {
             user,
             server: ServerPart { ctx, proof },
         })
+    }
+
+    pub fn decrypt(&self, esid: &Esid) -> Result<Decryption, Error> {
+        let c1 = Curve::point(&esid.c1).ok_or(Error::Esid)?;
+        let c2 = Curve::point(&esid.c2).ok_or(Error::Esid)?;
+        let sid = Curve::encode(&(c2 - c1 * self.key));
+        let statement = Statement::decryption(&self.root, esid, &sid).ok_or(Error::Proof)?;
+        let context = bcs::to_bytes(&(self.root, esid, &sid)).map_err(CodecError::from)?;
+        let nonce = Self::random()?;
+        let proof = Proof::prove(b"decryption", &statement, &context, &[self.key], &[nonce])
+            .ok_or(Error::Proof)?;
+        Ok(Decryption { sid, proof })
     }
 
     fn random() -> Result<Scalar, Error> {

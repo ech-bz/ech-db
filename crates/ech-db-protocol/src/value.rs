@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::Curve;
@@ -6,7 +8,7 @@ use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
 use crate::proof::{Equation, Proof, Statement, Term};
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Esid {
     pub tweak: [u8; 32],
     pub c1: [u8; 32],
@@ -120,12 +122,49 @@ impl Statement {
             }],
         }
     }
+
+    pub fn decryption(root: &Root, esid: &Esid, sid: &[u8; 32]) -> Option<Self> {
+        let c1 = Curve::point(&esid.c1)?;
+        let c2 = Curve::point(&esid.c2)?;
+        let sid = Curve::point(sid)?;
+        let mut statement = Self::server(root);
+        statement.equations.push(Equation {
+            terms: vec![Term {
+                base: Curve::encode(&-c1),
+                response: 0,
+            }],
+            target: Curve::encode(&(sid - c2)),
+        });
+        Some(statement)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Decryption {
+    pub sid: [u8; 32],
+    pub proof: Proof,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Request {
     pub tx: Tx,
-    pub sid: Option<[u8; 32]>,
+    pub decryptions: BTreeMap<Esid, Decryption>,
+}
+
+impl Request {
+    pub fn verify(&self, root: &Root) -> Result<(), Reject> {
+        self.tx.verify(root)?;
+        for (esid, decryption) in &self.decryptions {
+            let statement =
+                Statement::decryption(root, esid, &decryption.sid).ok_or(Reject::BadSignature)?;
+            let context =
+                bcs::to_bytes(&(root, esid, &decryption.sid)).map_err(|_| Reject::BadRequest)?;
+            decryption
+                .proof
+                .verify(b"decryption", &statement, &context)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
