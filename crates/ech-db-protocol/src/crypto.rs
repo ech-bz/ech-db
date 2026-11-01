@@ -34,6 +34,23 @@ impl Curve {
         wide.copy_from_slice(bytes);
         Scalar::from_bytes_mod_order_wide(&wide)
     }
+
+    pub fn check(
+        bases: &[RistrettoPoint],
+        responses: &[Scalar],
+        commitment: &RistrettoPoint,
+        challenge: &Scalar,
+        target: &RistrettoPoint,
+    ) -> bool {
+        if bases.len() != responses.len() {
+            return false;
+        }
+        let mut left = RistrettoPoint::identity();
+        for (base, response) in bases.iter().zip(responses) {
+            left += base * response;
+        }
+        left == *commitment + challenge * target
+    }
 }
 
 pub struct Hs;

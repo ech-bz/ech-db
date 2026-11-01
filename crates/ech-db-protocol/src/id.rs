@@ -10,9 +10,9 @@ use crate::error::{HexError, RootError};
 pub struct Root([u8; 32]);
 
 impl Root {
-    pub fn new(bytes: [u8; 32]) -> Option<Self> {
-        Curve::point(&bytes)?;
-        Some(Self(bytes))
+    pub fn new(bytes: [u8; 32]) -> Result<Self, RootError> {
+        Curve::point(&bytes).ok_or(RootError)?;
+        Ok(Self(bytes))
     }
 
     pub fn as_array(&self) -> &[u8; 32] {
@@ -30,7 +30,7 @@ impl FromStr for Root {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let bytes = hex::decode(text).map_err(|_| RootError)?;
         let array: [u8; 32] = bytes.try_into().map_err(|_| RootError)?;
-        Self::new(array).ok_or(RootError)
+        Self::new(array)
     }
 }
 

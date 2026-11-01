@@ -3,9 +3,13 @@ use std::fmt;
 use blake2b_simd::Params;
 use curve25519_dalek::scalar::Scalar;
 
-use ech_db_protocol::crypto::{Curve, Hs};
+use ech_db_protocol::crypto::Curve;
+use ech_db_protocol::error::CodecError;
 use ech_db_protocol::id::Root;
-use ech_db_protocol::value::{Call, Commitment, Esid, Response, Submission, User, UserProof};
+use ech_db_protocol::proof::{Proof, Statement};
+use ech_db_protocol::value::{Author, Call, Esid, UserPart};
+
+use crate::Error;
 
 pub struct Client([u8; 32]);
 
@@ -23,55 +27,45 @@ impl Client {
         Self::new(bytes)
     }
 
-    pub fn esid(&self, root: &Root, tweak: [u8; 32]) -> Option<Esid> {
-        let anchor = Curve::point(root.as_array())?;
+    pub fn esid(&self, root: &Root, tweak: [u8; 32]) -> Result<Esid, Error> {
+        let anchor = Curve::point(root.as_array()).ok_or(Error::Root)?;
         let (x, r) = self.scalars(root, tweak)?;
         let c1 = Curve::base() * r;
         let c2 = Curve::base() * x + anchor * r;
-        Some(Esid {
+        Ok(Esid {
             tweak,
             c1: Curve::encode(&c1),
             c2: Curve::encode(&c2),
         })
     }
 
-    pub fn submit(&self, root: &Root, call: Call, tweak: [u8; 32]) -> Option<Submission> {
-        let anchor = Curve::point(root.as_array())?;
+    pub fn sign(
+        &self,
+        root: &Root,
+        ctx: Vec<u8>,
+        call: Call,
+        tweak: [u8; 32],
+    ) -> Result<UserPart, Error> {
         let (x, r) = self.scalars(root, tweak)?;
         let esid = self.esid(root, tweak)?;
-        let beta = Self::random()?;
+        let statement = Statement::user(root, &esid);
+        let context = UserPart::context(root, &ctx, &call)?;
         let alpha = Self::random()?;
-        let t1 = Curve::base() * beta;
-        let t2 = Curve::base() * alpha + anchor * beta;
-        let commitment = Commitment {
-            t1: Curve::encode(&t1),
-            t2: Curve::encode(&t2),
-        };
-        let message = call.signing_bytes(root).ok()?;
-        let payload = bcs::to_bytes(&(root, &esid, &commitment, message)).ok()?;
-        let challenge = Hs::scalar(b"user", &payload);
-        let zx = alpha + challenge * x;
-        let zr = beta + challenge * r;
-        Some(Submission {
+        let beta = Self::random()?;
+        let proof = Proof::prove(b"user", &statement, &context, &[x, r], &[alpha, beta])
+            .ok_or(Error::Proof)?;
+        Ok(UserPart {
+            ctx,
             call,
-            user: Some(User {
-                esid,
-                proof: UserProof {
-                    commitment,
-                    response: Response {
-                        zx: zx.to_bytes(),
-                        zr: zr.to_bytes(),
-                    },
-                },
-            }),
+            author: Author::User { esid, proof },
         })
     }
 
-    fn scalars(&self, root: &Root, tweak: [u8; 32]) -> Option<(Scalar, Scalar)> {
+    fn scalars(&self, root: &Root, tweak: [u8; 32]) -> Result<(Scalar, Scalar), Error> {
         let x = Self::derive(&self.0, b"identity", root.as_bytes());
-        let info = bcs::to_bytes(&(root, tweak)).ok()?;
+        let info = bcs::to_bytes(&(root, tweak)).map_err(CodecError::from)?;
         let r = Self::derive(&self.0, b"encryption", &info);
-        Some((x, r))
+        Ok((x, r))
     }
 
     fn derive(secret: &[u8; 32], domain: &[u8], info: &[u8]) -> Scalar {
@@ -81,10 +75,10 @@ impl Client {
         Curve::reduce(state.finalize().as_bytes())
     }
 
-    fn random() -> Option<Scalar> {
+    fn random() -> Result<Scalar, Error> {
         let mut bytes = [0u8; 64];
-        getrandom::fill(&mut bytes).ok()?;
-        Some(Scalar::from_bytes_mod_order_wide(&bytes))
+        getrandom::fill(&mut bytes).map_err(|_| Error::Random)?;
+        Ok(Scalar::from_bytes_mod_order_wide(&bytes))
     }
 }
 

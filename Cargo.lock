@@ -360,6 +360,7 @@ dependencies = [
  "curve25519-dalek",
  "ech-db-protocol",
  "getrandom 0.3.4",
+ "thiserror",
 ]
 
 [[package]]

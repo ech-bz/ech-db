@@ -28,8 +28,8 @@ impl Programs {
     }
 
     pub fn native(&self, txid: &Txid, request: &Request) -> Result<Vec<u8>, DbError> {
-        match request.tx.submission.call.function.as_str() {
-            Self::UPLOAD_PROGRAM => self.upload(txid, &request.tx.submission.call.args),
+        match request.tx.user.call.function.as_str() {
+            Self::UPLOAD_PROGRAM => self.upload(txid, &request.tx.user.call.args),
             function => Err(DbError::reject(Reject::UnknownNative {
                 function: function.to_string(),
             })),
@@ -71,12 +71,12 @@ impl Programs {
         txid: &Txid,
     ) -> Result<Vec<u8>, DbError> {
         let tx = Log::tx(access, root, txid).await?;
-        if !matches!(tx.submission.call.program, Program::Native)
-            || tx.submission.call.function != Self::UPLOAD_PROGRAM
+        if !matches!(tx.user.call.program, Program::Native)
+            || tx.user.call.function != Self::UPLOAD_PROGRAM
         {
             return Err(DbError::reject(Reject::NotAProgram));
         }
-        Ok(tx.submission.call.args)
+        Ok(tx.user.call.args)
     }
 
     fn get(&self, txid: &Txid) -> Option<Module> {

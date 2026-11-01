@@ -9,3 +9,4 @@ bcs.workspace = true
 blake2b_simd.workspace = true
 curve25519-dalek.workspace = true
 getrandom.workspace = true
+thiserror.workspace = true

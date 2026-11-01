@@ -1,10 +1,10 @@
-use curve25519_dalek::RistrettoPoint;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{Curve, Hs};
+use crate::crypto::Curve;
 use crate::error::{CodecError, Reject};
 use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
+use crate::proof::{Equation, Proof, Statement, Term};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Esid {
@@ -22,133 +22,103 @@ pub enum Program {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Call {
     pub program: Program,
-    pub ctx: Vec<u8>,
     pub function: String,
     pub args: Vec<u8>,
 }
 
-impl Call {
-    pub fn signing_bytes(&self, root: &Root) -> Result<Vec<u8>, CodecError> {
-        bcs::to_bytes(&(root, self)).map_err(CodecError::from)
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Commitment {
-    pub t1: [u8; 32],
-    pub t2: [u8; 32],
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Response {
-    pub zx: [u8; 32],
-    pub zr: [u8; 32],
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub enum Author {
+    User { esid: Esid, proof: Proof },
+    Server,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct UserProof {
-    pub commitment: Commitment,
-    pub response: Response,
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct User {
-    pub esid: Esid,
-    pub proof: UserProof,
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Submission {
+pub struct UserPart {
+    pub ctx: Vec<u8>,
     pub call: Call,
-    pub user: Option<User>,
+    pub author: Author,
 }
 
-impl Submission {
-    pub fn txid(&self, root: &Root) -> Result<Txid, CodecError> {
-        let bytes = bcs::to_bytes(&(root, &self.call, &self.user)).map_err(CodecError::from)?;
-        Ok(Txid::new(Blake2b256::hash(&[bytes.as_slice()])))
-    }
-
-    pub fn verify(&self, root: &Root) -> Result<(), Reject> {
-        let anchor = Curve::point(root.as_array()).ok_or(Reject::BadRequest)?;
-        if let Some(user) = &self.user {
-            self.verify_user(root, &anchor, user)?;
-        }
-        Ok(())
-    }
-
-    pub fn admit(self, admission: Admission) -> Tx {
-        Tx {
-            submission: self,
-            admission,
-        }
-    }
-
-    fn verify_user(&self, root: &Root, anchor: &RistrettoPoint, user: &User) -> Result<(), Reject> {
-        let base = Curve::base();
-        let esid = &user.esid;
-        let commitment = &user.proof.commitment;
-        let response = &user.proof.response;
-        let c1 = Curve::point(&esid.c1).ok_or(Reject::BadSignature)?;
-        let c2 = Curve::point(&esid.c2).ok_or(Reject::BadSignature)?;
-        if c1 == Curve::identity() {
-            return Err(Reject::BadSignature);
-        }
-        let t1 = Curve::point(&commitment.t1).ok_or(Reject::BadSignature)?;
-        let t2 = Curve::point(&commitment.t2).ok_or(Reject::BadSignature)?;
-        let zx = Curve::scalar(&response.zx).ok_or(Reject::BadSignature)?;
-        let zr = Curve::scalar(&response.zr).ok_or(Reject::BadSignature)?;
-        let message = self
-            .call
-            .signing_bytes(root)
-            .map_err(|_| Reject::BadRequest)?;
-        let payload =
-            bcs::to_bytes(&(root, esid, commitment, message)).map_err(|_| Reject::BadRequest)?;
-        let challenge = Hs::scalar(b"user", &payload);
-        if zr * base != t1 + challenge * c1 {
-            return Err(Reject::BadSignature);
-        }
-        if zx * base + zr * *anchor != t2 + challenge * c2 {
-            return Err(Reject::BadSignature);
-        }
-        Ok(())
+impl UserPart {
+    pub fn context(root: &Root, ctx: &[u8], call: &Call) -> Result<Vec<u8>, CodecError> {
+        bcs::to_bytes(&(root, ctx, call)).map_err(CodecError::from)
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Admission {
-    pub k: [u8; 32],
-    pub sa: [u8; 32],
+pub struct ServerPart {
+    pub ctx: Vec<u8>,
+    pub proof: Proof,
 }
 
-impl Admission {
-    pub fn verify(&self, root: &Root, submission: &Submission) -> Result<(), Reject> {
-        let anchor = Curve::point(root.as_array()).ok_or(Reject::BadRequest)?;
-        let k = Curve::point(&self.k).ok_or(Reject::BadSignature)?;
-        let sa = Curve::scalar(&self.sa).ok_or(Reject::BadSignature)?;
-        let payload = bcs::to_bytes(&(root, self.k, submission)).map_err(|_| Reject::BadRequest)?;
-        let challenge = Hs::scalar(b"admission", &payload);
-        if sa * Curve::base() != k + challenge * anchor {
-            return Err(Reject::BadSignature);
-        }
-        Ok(())
+impl ServerPart {
+    pub fn context(root: &Root, user: &UserPart, ctx: &[u8]) -> Result<Vec<u8>, CodecError> {
+        bcs::to_bytes(&(root, user, ctx)).map_err(CodecError::from)
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Tx {
-    pub submission: Submission,
-    pub admission: Admission,
+    pub user: UserPart,
+    pub server: ServerPart,
 }
 
 impl Tx {
     pub fn txid(&self, root: &Root) -> Result<Txid, CodecError> {
-        self.submission.txid(root)
+        let bytes = bcs::to_bytes(&(root, &self.user)).map_err(CodecError::from)?;
+        Ok(Txid::new(Blake2b256::hash(&[bytes.as_slice()])))
     }
 
     pub fn verify(&self, root: &Root) -> Result<(), Reject> {
-        self.submission.verify(root)?;
-        self.admission.verify(root, &self.submission)
+        if let Author::User { esid, proof } = &self.user.author {
+            if Curve::point(&esid.c1) == Some(Curve::identity()) {
+                return Err(Reject::BadSignature);
+            }
+            let statement = Statement::user(root, esid);
+            let context = UserPart::context(root, &self.user.ctx, &self.user.call)
+                .map_err(|_| Reject::BadRequest)?;
+            proof.verify(b"user", &statement, &context)?;
+        }
+        let statement = Statement::server(root);
+        let context = ServerPart::context(root, &self.user, &self.server.ctx)
+            .map_err(|_| Reject::BadRequest)?;
+        self.server.proof.verify(b"server", &statement, &context)
+    }
+}
+
+impl Statement {
+    pub fn user(root: &Root, esid: &Esid) -> Self {
+        let base = Curve::encode(&Curve::base());
+        Self {
+            equations: vec![
+                Equation {
+                    terms: vec![Term { base, response: 1 }],
+                    target: esid.c1,
+                },
+                Equation {
+                    terms: vec![
+                        Term { base, response: 0 },
+                        Term {
+                            base: *root.as_array(),
+                            response: 1,
+                        },
+                    ],
+                    target: esid.c2,
+                },
+            ],
+        }
+    }
+
+    pub fn server(root: &Root) -> Self {
+        Self {
+            equations: vec![Equation {
+                terms: vec![Term {
+                    base: Curve::encode(&Curve::base()),
+                    response: 0,
+                }],
+                target: *root.as_array(),
+            }],
+        }
     }
 }
 
