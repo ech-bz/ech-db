@@ -1,4 +1,5 @@
 use bcs::{from_bytes, to_bytes};
+use futures::{stream, StreamExt, TryStreamExt};
 use wasmi::errors::ErrorKind;
 use wasmi::{
     Caller, Engine, Linker, Memory, Module, Store, TrapCode, TypedResumableCall,
@@ -15,6 +16,7 @@ use crate::fdb::{Mutator, Reader};
 use crate::wasm::{Profile, ProfileLimiter};
 
 const SUSPEND: i32 = 0x0ECDB;
+const CONCURRENT_READS: usize = 64;
 
 pub struct Executor {
     engine: Engine,
@@ -120,10 +122,17 @@ impl Executor {
         let root = store.data().root;
         match pending {
             Pending::Get(keys) => {
-                let mut values = Vec::with_capacity(keys.len());
-                for key in &keys {
-                    values.push(access.get(&key.physical(&root)).await?);
-                }
+                let reads: Vec<_> = keys
+                    .into_iter()
+                    .map(|key| {
+                        let key = key.physical(&root);
+                        async move { access.get(&key).await }
+                    })
+                    .collect();
+                let values: Vec<Option<Vec<u8>>> = stream::iter(reads)
+                    .buffered(CONCURRENT_READS)
+                    .try_collect()
+                    .await?;
                 let bytes = to_bytes(&values).map_err(|_| DbError::integrity())?;
                 Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
