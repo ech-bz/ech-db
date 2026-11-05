@@ -16,6 +16,8 @@ pub trait Reader {
 
     fn writes(&self) -> &Self::Writes;
 
+    fn read_only(&self) -> bool;
+
     fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>, DbError>> + Send;
 
     fn scan(
@@ -144,6 +146,10 @@ impl Reader for View {
         &DENIED
     }
 
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>, DbError>> + Send {
         View::get(self, key)
     }
@@ -221,6 +227,10 @@ impl Reader for Edit {
 
     fn writes(&self) -> &Edit {
         self
+    }
+
+    fn read_only(&self) -> bool {
+        false
     }
 
     fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>, DbError>> + Send {

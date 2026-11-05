@@ -17,12 +17,13 @@ impl Abi {
             let ExternType::Func(func) = import.ty() else {
                 return Err(DbError::reject(Reject::Abi));
             };
-            let results = match import.name() {
-                "get" | "get_range" | "response_copy" => 1,
-                "set" | "del" | "abort" => 0,
+            let (params, results) = match import.name() {
+                "get" | "get_range" | "response_copy" => (2, 1),
+                "set" | "del" | "abort" => (2, 0),
+                "read_only" => (0, 1),
                 _ => return Err(DbError::reject(Reject::Abi)),
             };
-            if func.params().len() != 2 || func.results().len() != results {
+            if func.params().len() != params || func.results().len() != results {
                 return Err(DbError::reject(Reject::Abi));
             }
             if !func.params().iter().all(|param| *param == ValType::I32) {

@@ -13,11 +13,16 @@ extern "C" {
     fn set(ptr: i32, len: i32);
     fn del(ptr: i32, len: i32);
     fn abort(ptr: i32, len: i32);
+    fn read_only() -> i32;
 }
 
 pub struct Host;
 
 impl Host {
+    pub fn read_only() -> bool {
+        unsafe { read_only() != 0 }
+    }
+
     pub fn get_raw(keys: &[ReadKey]) -> Vec<Option<Vec<u8>>> {
         let input = to_bcs_bytes(&keys.to_vec());
         let response_len = unsafe { get(input.as_ptr() as i32, input.len() as i32) };

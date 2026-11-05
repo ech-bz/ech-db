@@ -51,7 +51,10 @@ impl Executor {
         linker
             .func_wrap("ech", "abort", Host::abort)
             .map_err(|_| DbError::reject(Reject::Abi))?;
-        let mut store = Store::new(&self.engine, ExecState::new(*root));
+        linker
+            .func_wrap("ech", "read_only", Host::read_only)
+            .map_err(|_| DbError::reject(Reject::Abi))?;
+        let mut store = Store::new(&self.engine, ExecState::new(*root, access.read_only()));
         store.limiter(|state| &mut state.limits);
         store
             .set_fuel(Profile::FUEL)
@@ -247,6 +250,7 @@ impl Executor {
 
 struct ExecState {
     root: Root,
+    read_only: bool,
     memory: Option<Memory>,
     in_alloc: bool,
     response: Option<Vec<u8>>,
@@ -257,9 +261,10 @@ struct ExecState {
 }
 
 impl ExecState {
-    fn new(root: Root) -> Self {
+    fn new(root: Root, read_only: bool) -> Self {
         Self {
             root,
+            read_only,
             memory: None,
             in_alloc: false,
             response: None,
@@ -325,6 +330,10 @@ impl Host {
             Ok(Pending::Abort(bytes.to_vec()))
         })
         .map(|_| ())
+    }
+
+    fn read_only(caller: Caller<'_, ExecState>) -> Result<i32, wasmi::Error> {
+        Ok(i32::from(caller.data().read_only))
     }
 
     fn response_copy(
