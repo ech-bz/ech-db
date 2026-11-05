@@ -65,8 +65,10 @@ impl Log {
         root: &Root,
         txid: &Txid,
     ) -> Result<Record, DbError> {
-        let tx = Self::tx(access, root, txid).await?;
-        let result = Self::response(access, root, txid).await?;
+        let (tx, result) = futures::try_join!(
+            Self::tx(access, root, txid),
+            Self::response(access, root, txid),
+        )?;
         Ok(Record { tx, result })
     }
 
