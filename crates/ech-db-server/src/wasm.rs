@@ -9,7 +9,7 @@ impl Profile {
     pub const TABLE_LIMIT: usize = 65_536;
     pub const VALUE_STACK_LIMIT: usize = 1024 * 1024;
     pub const CALL_DEPTH: usize = 1024;
-    pub const FUEL: u64 = 10_000_000;
+    pub const FUEL: u64 = 1_000_000_000;
     pub const HOST_CALL_BASE_FUEL: u64 = 100;
     pub const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
     pub const WRITE_LIMIT: usize = 8 * 1024 * 1024;
