@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use wasmi::Module;
+
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
 
@@ -15,6 +17,15 @@ pub struct Server {
     pub db: Db,
     pub executor: Executor,
     pub programs: Programs,
+}
+
+pub(crate) enum PreparedProgram {
+    Native,
+    Wasm {
+        id: Txid,
+        module: Module,
+        load_ms: f64,
+    },
 }
 
 impl Server {
@@ -39,11 +50,45 @@ impl Server {
         txid: &Txid,
         request: &Request,
     ) -> Result<Vec<u8>, DbError> {
+        let prepared = self.prepare_program(access, root, request).await?;
+        self.execute_prepared(access, root, txid, request, prepared)
+            .await
+    }
+
+    pub(crate) async fn prepare_program<R: Reader>(
+        &self,
+        access: &R,
+        root: &Root,
+        request: &Request,
+    ) -> Result<PreparedProgram, DbError> {
+        let started = Instant::now();
         match request.tx.user.call.program {
-            Program::Txid(program) => {
-                let started = Instant::now();
-                let module = self.programs.module(access, root, &program).await?;
-                let module_ms = started.elapsed().as_secs_f64() * 1000.0;
+            Program::Txid(id) => {
+                let module = self.programs.module(access, root, &id).await?;
+                Ok(PreparedProgram::Wasm {
+                    id,
+                    module,
+                    load_ms: started.elapsed().as_secs_f64() * 1000.0,
+                })
+            }
+            Program::Native => Ok(PreparedProgram::Native),
+        }
+    }
+
+    pub(crate) async fn execute_prepared<R: Reader>(
+        &self,
+        access: &R,
+        root: &Root,
+        txid: &Txid,
+        request: &Request,
+        prepared: PreparedProgram,
+    ) -> Result<Vec<u8>, DbError> {
+        match prepared {
+            PreparedProgram::Wasm {
+                id,
+                module,
+                load_ms: module_ms,
+            } => {
                 let execution_started = Instant::now();
                 let result = self.executor.run(access, &module, root, request).await;
                 let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
@@ -51,7 +96,7 @@ impl Server {
                     tracing::info!(
                         %root,
                         %txid,
-                        %program,
+                        program = %id,
                         function = %request.tx.user.call.function,
                         read_only = access.read_only(),
                         module_ms,
@@ -62,7 +107,7 @@ impl Server {
                 }
                 result
             }
-            Program::Native => self.programs.native(txid, request),
+            PreparedProgram::Native => self.programs.native(txid, request),
         }
     }
 }

@@ -76,16 +76,23 @@ impl Server {
         tracing::Span::current().record("txid", tracing::field::display(txid));
         let verify_ms = started.elapsed().as_secs_f64() * 1000.0;
         let lookup_started = Instant::now();
-        if Log::exists(edit, root, &txid).await? {
+        let (exists, prepared) = futures::join!(
+            Log::exists(edit, root, &txid),
+            self.prepare_program(edit, root, request),
+        );
+        if exists? {
             return Err(DbError::reject(Reject::Duplicate));
         }
+        let prepared = prepared?;
         let lookup_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
         let body = to_bytes(&request.tx).map_err(|_| DbError::reject(Reject::BadRequest))?;
         if body.len() > Chunks::MAX_BODY {
             return Err(DbError::reject(Reject::ResourceLimit));
         }
         let execution_started = Instant::now();
-        let result = self.execute(edit, root, &txid, request).await?;
+        let result = self
+            .execute_prepared(edit, root, &txid, request, prepared)
+            .await?;
         let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
         if result.len() > Chunks::MAX_RESULT {
             return Err(DbError::reject(Reject::ResourceLimit));
