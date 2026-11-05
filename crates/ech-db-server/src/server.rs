@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
@@ -40,8 +41,26 @@ impl Server {
     ) -> Result<Vec<u8>, DbError> {
         match request.tx.user.call.program {
             Program::Txid(program) => {
+                let started = Instant::now();
                 let module = self.programs.module(access, root, &program).await?;
-                self.executor.run(access, &module, root, request).await
+                let module_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let execution_started = Instant::now();
+                let result = self.executor.run(access, &module, root, request).await;
+                let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
+                if module_ms + execution_ms >= 100.0 {
+                    tracing::info!(
+                        %root,
+                        %txid,
+                        %program,
+                        function = %request.tx.user.call.function,
+                        read_only = access.read_only(),
+                        module_ms,
+                        execution_ms,
+                        success = result.is_ok(),
+                        "slow program execution"
+                    );
+                }
+                result
             }
             Program::Native => self.programs.native(txid, request),
         }
