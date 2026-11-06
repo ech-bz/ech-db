@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use foundationdb::options::MutationType;
+use foundationdb::options::{MutationType, StreamingMode};
 use foundationdb::{Database, FdbError, RangeOption, Transaction};
 use futures::TryStreamExt;
 use serde::Serialize;
@@ -119,6 +119,7 @@ impl View {
         reverse: bool,
     ) -> Result<Vec<Row>, DbError> {
         let mut option = RangeOption::from((begin.to_vec(), end.to_vec()));
+        option.mode = StreamingMode::WantAll;
         option.reverse = reverse;
         if let Some(limit) = limit {
             option.limit =
