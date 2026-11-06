@@ -12,6 +12,7 @@ use crate::abi::Abi;
 use crate::error::DbError;
 use crate::fdb::Reader;
 use crate::log::Log;
+use crate::timing::Timer;
 
 pub struct Programs {
     engine: Engine,
@@ -45,21 +46,27 @@ impl Programs {
         root: &Root,
         txid: &Txid,
     ) -> Result<Module, DbError> {
+        let _module = Timer::new("db_module");
+        let check = Timer::new("db_module_check");
         if !Log::exists(access, root, txid)
             .instrument(tracing::debug_span!(target: "latency", "wasm.check_program"))
             .await?
         {
             return Err(DbError::reject(Reject::ProgramNotFound));
         }
+        drop(check);
         if let Some(module) = self.get(txid) {
             tracing::Span::current().record("cached", true);
             return Ok(module);
         }
         tracing::Span::current().record("cached", false);
+        let load = Timer::new("db_module_load");
         let wasm = self
             .wasm(access, root, txid)
             .instrument(tracing::debug_span!(target: "latency", "wasm.load_program"))
             .await?;
+        drop(load);
+        let _compile = Timer::new("db_module_compile");
         let module = tracing::debug_span!(target: "latency", "wasm.compile", bytes = wasm.len())
             .in_scope(|| {
                 let module = Module::new(&self.engine, wasm.as_slice())

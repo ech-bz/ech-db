@@ -15,6 +15,7 @@ use ech_db_protocol::value::Request;
 use crate::error::DbError;
 use crate::log::{Dir, History};
 use crate::server::Server;
+use crate::timing::{self, Timer};
 
 const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -25,7 +26,10 @@ impl Server {
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
             .route("/{root}/append", post(Server::append_request))
-            .route("/{root}/query", post(Server::query_request))
+            .route(
+                "/{root}/query",
+                post(Server::query_request).layer(axum::middleware::from_fn(timing::middleware)),
+            )
             .route("/{root}/tx", get(Server::history_request))
             .layer(DefaultBodyLimit::max(Self::BODY_LIMIT))
             .with_state(self.clone())
@@ -58,6 +62,8 @@ impl Server {
         Path(root): Path<String>,
         body: Bytes,
     ) -> Response {
+        let _handler = Timer::new("db_handler");
+        let decode = Timer::new("db_decode");
         let root = match root.parse::<Root>() {
             Ok(root) => root,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
@@ -69,7 +75,10 @@ impl Server {
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
         tracing::Span::current().record("function", &request.tx.user.call.function);
-        match server.query(root, request).await {
+        drop(decode);
+        let outcome = server.query(root, request).await;
+        let _encode = Timer::new("db_encode");
+        match outcome {
             Ok(outcome) => tracing::debug_span!(target: "latency", "query.encode_response",
                 result_bytes = outcome.result.len())
             .in_scope(|| Self::encoded(&outcome)),

@@ -6,6 +6,7 @@ use tracing::Instrument;
 use crate::error::DbError;
 use crate::fdb::View;
 use crate::server::Server;
+use crate::timing::{self, Timer};
 
 impl Server {
     pub async fn query(&self, root: Root, request: Request) -> Result<Outcome, DbError> {
@@ -25,7 +26,9 @@ impl Server {
             {
                 Ok(outcome) => return Ok(outcome),
                 Err(DbError::Reject(reject)) => return Err(DbError::Reject(reject)),
-                Err(DbError::Fdb(error)) => view = view.retry(error).await?,
+                Err(DbError::Fdb(error)) => {
+                    view = timing::measure_async("db_retry", view.retry(error)).await?;
+                }
             }
         }
     }
@@ -37,11 +40,14 @@ impl Server {
         txid: Txid,
         request: &Request,
     ) -> Result<Outcome, DbError> {
+        let _attempt = Timer::new("db_attempt");
+        let verify = Timer::new("db_verify");
         tracing::debug_span!(target: "latency", "query.verify")
             .in_scope(|| request.verify(root))
             .map_err(DbError::Reject)?;
+        drop(verify);
         if matches!(request.tx.user.call.program, Program::Txid(_)) {
-            view.read_version().await?;
+            timing::measure_async("db_grv", view.read_version()).await?;
         }
         let result = self.execute(view, root, &txid, request).await?;
         if result.len() > Chunks::MAX_RESULT {

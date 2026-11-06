@@ -10,3 +10,5 @@ pub mod programs;
 pub mod query;
 pub mod server;
 pub mod wasm;
+
+mod timing;

@@ -14,6 +14,7 @@ use ech_db_protocol::value::{CallOutput, Request};
 
 use crate::error::DbError;
 use crate::fdb::{Mutator, Reader};
+use crate::timing::Timer;
 use crate::wasm::{Profile, ProfileLimiter};
 
 const SUSPEND: i32 = 0x0ECDB;
@@ -35,6 +36,8 @@ impl Executor {
         root: &Root,
         request: &Request,
     ) -> Result<Vec<u8>, DbError> {
+        let _execute = Timer::new("db_execute");
+        let setup = Timer::new("db_setup");
         let (mut store, entry, ptr, length) = tracing::debug_span!(target: "latency", "wasm.setup")
             .in_scope(|| {
                 let mut linker = <Linker<ExecState>>::new(&self.engine);
@@ -93,12 +96,15 @@ impl Executor {
                 Self::write(&mut store, ptr, &payload)?;
                 Ok::<_, DbError>((store, entry, ptr, length))
             })?;
+        drop(setup);
+        let call = Timer::new("db_wasm");
         let mut step = match tracing::debug_span!(target: "latency", "wasm.call")
             .in_scope(|| entry.call_resumable(&mut store, (ptr, length)))
         {
             Ok(step) => step,
             Err(error) => return Err(Self::trap(&mut store, &error)),
         };
+        drop(call);
         let value = loop {
             match step {
                 TypedResumableCall::Finished(value) => break value,
@@ -115,6 +121,7 @@ impl Executor {
                 }
             }
         };
+        let _decode = Timer::new("db_output_decode");
         match tracing::debug_span!(target: "latency", "wasm.decode_output")
             .in_scope(|| Self::output(&store, value))?
         {
@@ -132,6 +139,7 @@ impl Executor {
         let root = store.data().root;
         match pending {
             Pending::Get(keys) => {
+                let read = Timer::new("db_get");
                 let reads: Vec<_> = keys
                     .into_iter()
                     .map(|key| {
@@ -148,6 +156,8 @@ impl Executor {
                         concurrency = CONCURRENT_READS),
                     )
                     .await?;
+                drop(read);
+                let encode = Timer::new("db_host_encode");
                 let bytes =
                     tracing::debug_span!(target: "latency", "host.encode_get", keys = count)
                         .in_scope(|| {
@@ -162,15 +172,19 @@ impl Executor {
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
                 store.data_mut().response = Some(bytes);
+                drop(encode);
                 Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Range(range) => {
+                let read = Timer::new("db_range");
                 let (begin, end) = range.physical(&root);
                 let prefix = begin.len() - range.start.len();
                 let rows = access
                     .scan(&begin, &end, None)
                     .instrument(tracing::debug_span!(target: "latency", "fdb.range"))
                     .await?;
+                drop(read);
+                let encode = Timer::new("db_host_encode");
                 let bytes =
                     tracing::debug_span!(target: "latency", "host.encode_range", rows = rows.len())
                         .in_scope(|| {
@@ -188,6 +202,7 @@ impl Executor {
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
                 store.data_mut().response = Some(bytes);
+                drop(encode);
                 Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Set(user_key, value) => {
@@ -220,6 +235,7 @@ impl Executor {
         typed: TypedResumableCallHostTrap<i64>,
         values: &[Val],
     ) -> Result<TypedResumableCall<i64>, DbError> {
+        let _resume = Timer::new("db_wasm");
         match typed.resume(&mut *store, values) {
             Ok(next) => Ok(next),
             Err(error) => Err(Self::trap(store, &error)),
