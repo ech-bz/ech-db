@@ -1,14 +1,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
 
+use tracing::Instrument;
 use wasmi::Module;
 
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
 
 use crate::error::DbError;
-use crate::exec::{Executor, ReadMetrics};
+use crate::exec::Executor;
 use crate::fdb::{Db, Reader};
 use crate::programs::Programs;
 use crate::wasm::Profile;
@@ -21,11 +21,7 @@ pub struct Server {
 
 pub(crate) enum PreparedProgram {
     Native,
-    Wasm {
-        id: Txid,
-        module: Module,
-        load_ms: f64,
-    },
+    Wasm { id: Txid, module: Module },
 }
 
 impl Server {
@@ -61,15 +57,10 @@ impl Server {
         root: &Root,
         request: &Request,
     ) -> Result<PreparedProgram, DbError> {
-        let started = Instant::now();
         match request.tx.user.call.program {
             Program::Txid(id) => {
                 let module = self.programs.module(access, root, &id).await?;
-                Ok(PreparedProgram::Wasm {
-                    id,
-                    module,
-                    load_ms: started.elapsed().as_secs_f64() * 1000.0,
-                })
+                Ok(PreparedProgram::Wasm { id, module })
             }
             Program::Native => Ok(PreparedProgram::Native),
         }
@@ -84,38 +75,13 @@ impl Server {
         prepared: PreparedProgram,
     ) -> Result<Vec<u8>, DbError> {
         match prepared {
-            PreparedProgram::Wasm {
-                id,
-                module,
-                load_ms: module_ms,
-            } => {
-                let execution_started = Instant::now();
-                let mut reads = ReadMetrics::default();
-                let result = self
-                    .executor
-                    .run(access, &module, root, request, &mut reads)
-                    .await;
-                let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
-                if module_ms + execution_ms >= 100.0 {
-                    tracing::info!(
-                        %root,
-                        %txid,
-                        program = %id,
-                        function = %request.tx.user.call.function,
-                        read_only = access.read_only(),
-                        module_ms,
-                        execution_ms,
-                        get_calls = reads.get_calls,
-                        get_keys = reads.get_keys,
-                        get_ms = reads.get_time.as_secs_f64() * 1000.0,
-                        range_calls = reads.range_calls,
-                        range_rows = reads.range_rows,
-                        range_ms = reads.range_time.as_secs_f64() * 1000.0,
-                        success = result.is_ok(),
-                        "slow program execution"
-                    );
-                }
-                result
+            PreparedProgram::Wasm { id, module } => {
+                self.executor
+                    .run(access, &module, root, request)
+                    .instrument(tracing::debug_span!(target: "latency", "wasm.execute",
+                    %root, %txid, program = %id, function = %request.tx.user.call.function,
+                    read_only = access.read_only()))
+                    .await
             }
             PreparedProgram::Native => self.programs.native(txid, request),
         }

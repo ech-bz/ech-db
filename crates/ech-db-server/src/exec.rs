@@ -1,7 +1,6 @@
-use std::time::{Duration, Instant};
-
 use bcs::{from_bytes, to_bytes};
 use futures::{stream, StreamExt, TryStreamExt};
+use tracing::Instrument;
 use wasmi::errors::ErrorKind;
 use wasmi::{
     Caller, Engine, Linker, Memory, Module, Store, TrapCode, TypedResumableCall,
@@ -20,16 +19,6 @@ use crate::wasm::{Profile, ProfileLimiter};
 const SUSPEND: i32 = 0x0ECDB;
 const CONCURRENT_READS: usize = 64;
 
-#[derive(Default)]
-pub struct ReadMetrics {
-    pub get_calls: usize,
-    pub get_keys: usize,
-    pub get_time: Duration,
-    pub range_calls: usize,
-    pub range_rows: usize,
-    pub range_time: Duration,
-}
-
 pub struct Executor {
     engine: Engine,
 }
@@ -45,62 +34,68 @@ impl Executor {
         module: &Module,
         root: &Root,
         request: &Request,
-        reads: &mut ReadMetrics,
     ) -> Result<Vec<u8>, DbError> {
-        let mut linker = <Linker<ExecState>>::new(&self.engine);
-        linker
-            .func_wrap("ech", "get", Host::get)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        linker
-            .func_wrap("ech", "get_range", Host::get_range)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        linker
-            .func_wrap("ech", "response_copy", Host::response_copy)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        linker
-            .func_wrap("ech", "set", Host::set)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        linker
-            .func_wrap("ech", "del", Host::del)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        linker
-            .func_wrap("ech", "abort", Host::abort)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        linker
-            .func_wrap("ech", "read_only", Host::read_only)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        let mut store = Store::new(&self.engine, ExecState::new(*root, access.read_only()));
-        store.limiter(|state| &mut state.limits);
-        store
-            .set_fuel(Profile::FUEL)
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
-        let instance = linker
-            .instantiate_and_start(&mut store, module)
-            .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
-        let memory = instance
-            .get_memory(&store, "memory")
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
-        store.data_mut().memory = Some(memory);
-        let alloc = instance
-            .get_typed_func::<i32, i32>(&store, "ech_alloc")
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        let entry = instance
-            .get_typed_func::<(i32, i32), i64>(&store, "ech_call")
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        let payload = to_bytes(&(root, request)).map_err(|_| DbError::reject(Reject::Abi))?;
-        let length =
-            i32::try_from(payload.len()).map_err(|_| DbError::reject(Reject::ResourceLimit))?;
-        store.data_mut().in_alloc = true;
-        let ptr = match alloc.call(&mut store, length) {
-            Ok(ptr) => ptr,
-            Err(error) => {
+        let (mut store, entry, ptr, length) = tracing::debug_span!(target: "latency", "wasm.setup")
+            .in_scope(|| {
+                let mut linker = <Linker<ExecState>>::new(&self.engine);
+                linker
+                    .func_wrap("ech", "get", Host::get)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "get_range", Host::get_range)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "response_copy", Host::response_copy)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "set", Host::set)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "del", Host::del)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "abort", Host::abort)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "read_only", Host::read_only)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                let mut store = Store::new(&self.engine, ExecState::new(*root, access.read_only()));
+                store.limiter(|state| &mut state.limits);
+                store
+                    .set_fuel(Profile::FUEL)
+                    .map_err(|_| DbError::reject(Reject::VmTrap))?;
+                let instance = linker
+                    .instantiate_and_start(&mut store, module)
+                    .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
+                let memory = instance
+                    .get_memory(&store, "memory")
+                    .ok_or_else(|| DbError::reject(Reject::Abi))?;
+                store.data_mut().memory = Some(memory);
+                let alloc = instance
+                    .get_typed_func::<i32, i32>(&store, "ech_alloc")
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                let entry = instance
+                    .get_typed_func::<(i32, i32), i64>(&store, "ech_call")
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                let payload =
+                    to_bytes(&(root, request)).map_err(|_| DbError::reject(Reject::Abi))?;
+                let length = i32::try_from(payload.len())
+                    .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
+                store.data_mut().in_alloc = true;
+                let ptr = match alloc.call(&mut store, length) {
+                    Ok(ptr) => ptr,
+                    Err(error) => {
+                        store.data_mut().in_alloc = false;
+                        return Err(Self::trap(&mut store, &error));
+                    }
+                };
                 store.data_mut().in_alloc = false;
-                return Err(Self::trap(&mut store, &error));
-            }
-        };
-        store.data_mut().in_alloc = false;
-        Self::write(&mut store, ptr, &payload)?;
-        let mut step = match entry.call_resumable(&mut store, (ptr, length)) {
+                Self::write(&mut store, ptr, &payload)?;
+                Ok::<_, DbError>((store, entry, ptr, length))
+            })?;
+        let mut step = match tracing::debug_span!(target: "latency", "wasm.call")
+            .in_scope(|| entry.call_resumable(&mut store, (ptr, length)))
+        {
             Ok(step) => step,
             Err(error) => return Err(Self::trap(&mut store, &error)),
         };
@@ -116,11 +111,13 @@ impl Executor {
                         Some(pending) => pending,
                         None => return Err(DbError::reject(Reject::Abi)),
                     };
-                    step = Self::resume(access, &mut store, trap, pending, reads).await?;
+                    step = Self::resume(access, &mut store, trap, pending).await?;
                 }
             }
         };
-        match Self::output(&store, value)? {
+        match tracing::debug_span!(target: "latency", "wasm.decode_output")
+            .in_scope(|| Self::output(&store, value))?
+        {
             CallOutput::Ok(bytes) => Ok(bytes),
             CallOutput::Err(bytes) => Err(DbError::reject(Reject::Application { bytes })),
         }
@@ -131,13 +128,10 @@ impl Executor {
         store: &mut Store<ExecState>,
         typed: TypedResumableCallHostTrap<i64>,
         pending: Pending,
-        metrics: &mut ReadMetrics,
     ) -> Result<TypedResumableCall<i64>, DbError> {
         let root = store.data().root;
         match pending {
             Pending::Get(keys) => {
-                metrics.get_calls += 1;
-                metrics.get_keys += keys.len();
                 let reads: Vec<_> = keys
                     .into_iter()
                     .map(|key| {
@@ -145,46 +139,48 @@ impl Executor {
                         async move { access.get(&key).await }
                     })
                     .collect();
-                let started = Instant::now();
-                let values: Result<Vec<Option<Vec<u8>>>, DbError> = stream::iter(reads)
+                let count = reads.len();
+                let values: Vec<Option<Vec<u8>>> = stream::iter(reads)
                     .buffered(CONCURRENT_READS)
                     .try_collect()
-                    .await;
-                metrics.get_time += started.elapsed();
-                let values = values?;
-                let bytes = to_bytes(&values).map_err(|_| DbError::integrity())?;
+                    .instrument(
+                        tracing::debug_span!(target: "latency", "fdb.get_batch", keys = count,
+                        concurrency = CONCURRENT_READS),
+                    )
+                    .await?;
+                let bytes =
+                    tracing::debug_span!(target: "latency", "host.encode_get", keys = count)
+                        .in_scope(|| to_bytes(&values))
+                        .map_err(|_| DbError::integrity())?;
                 Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
                 store.data_mut().response = Some(bytes);
-                match typed.resume(&mut *store, &[Val::I32(length)]) {
-                    Ok(next) => Ok(next),
-                    Err(error) => Err(Self::trap(store, &error)),
-                }
+                Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Range(range) => {
                 let (begin, end) = range.physical(&root);
                 let prefix = begin.len() - range.start.len();
-                metrics.range_calls += 1;
-                let started = Instant::now();
-                let rows = access.scan(&begin, &end, None).await;
-                metrics.range_time += started.elapsed();
-                let rows = rows?;
-                metrics.range_rows += rows.len();
-                let mut values = Vec::with_capacity(rows.len());
-                for (key, value) in rows {
-                    let suffix = key.get(prefix..).ok_or_else(DbError::integrity)?.to_vec();
-                    values.push((suffix, value));
-                }
-                let bytes = to_bytes(&values).map_err(|_| DbError::integrity())?;
+                let rows = access
+                    .scan(&begin, &end, None)
+                    .instrument(tracing::debug_span!(target: "latency", "fdb.range"))
+                    .await?;
+                let bytes =
+                    tracing::debug_span!(target: "latency", "host.encode_range", rows = rows.len())
+                        .in_scope(|| {
+                            let mut values = Vec::with_capacity(rows.len());
+                            for (key, value) in rows {
+                                let suffix =
+                                    key.get(prefix..).ok_or_else(DbError::integrity)?.to_vec();
+                                values.push((suffix, value));
+                            }
+                            to_bytes(&values).map_err(|_| DbError::integrity())
+                        })?;
                 Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
                 store.data_mut().response = Some(bytes);
-                match typed.resume(&mut *store, &[Val::I32(length)]) {
-                    Ok(next) => Ok(next),
-                    Err(error) => Err(Self::trap(store, &error)),
-                }
+                Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Set(user_key, value) => {
                 let key = ReadKey::kv(user_key).physical(&root);
@@ -198,20 +194,27 @@ impl Executor {
                 }
                 access.writes().put(&key, &value)?;
                 store.data_mut().writes = total;
-                match typed.resume(&mut *store, &[]) {
-                    Ok(next) => Ok(next),
-                    Err(error) => Err(Self::trap(store, &error)),
-                }
+                Self::resume_wasm(store, typed, &[])
             }
             Pending::Del(user_key) => {
                 let key = ReadKey::kv(user_key).physical(&root);
                 access.writes().clear(&key)?;
-                match typed.resume(&mut *store, &[]) {
-                    Ok(next) => Ok(next),
-                    Err(error) => Err(Self::trap(store, &error)),
-                }
+                Self::resume_wasm(store, typed, &[])
             }
             Pending::Abort(bytes) => Err(DbError::reject(Reject::Application { bytes })),
+        }
+    }
+
+    #[tracing::instrument(target = "latency", level = "debug", name = "wasm.resume", skip_all,
+        fields(response_bytes = store.data().response.as_ref().map_or(0, Vec::len)))]
+    fn resume_wasm(
+        store: &mut Store<ExecState>,
+        typed: TypedResumableCallHostTrap<i64>,
+        values: &[Val],
+    ) -> Result<TypedResumableCall<i64>, DbError> {
+        match typed.resume(&mut *store, values) {
+            Ok(next) => Ok(next),
+            Err(error) => Err(Self::trap(store, &error)),
         }
     }
 

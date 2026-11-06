@@ -80,6 +80,18 @@ pub struct View {
 }
 
 impl View {
+    #[tracing::instrument(
+        target = "latency",
+        level = "debug",
+        name = "fdb.read_version",
+        skip_all
+    )]
+    pub async fn read_version(&self) -> Result<(), DbError> {
+        self.trx.get_read_version().await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(target = "latency", level = "debug", name = "fdb.retry", skip_all)]
     pub async fn retry(self, error: FdbError) -> Result<Self, FdbError> {
         Ok(Self {
             trx: self.trx.on_error(error).await?,

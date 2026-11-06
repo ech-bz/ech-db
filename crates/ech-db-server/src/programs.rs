@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use tracing::Instrument;
 use wasmi::{Engine, Module};
 
 use ech_db_protocol::error::Reject;
@@ -36,22 +37,36 @@ impl Programs {
         }
     }
 
+    #[tracing::instrument(target = "latency", level = "debug", name = "wasm.module", skip_all,
+        fields(program = %txid, cached = tracing::field::Empty))]
     pub async fn module<R: Reader>(
         &self,
         access: &R,
         root: &Root,
         txid: &Txid,
     ) -> Result<Module, DbError> {
-        if !Log::exists(access, root, txid).await? {
+        if !Log::exists(access, root, txid)
+            .instrument(tracing::debug_span!(target: "latency", "wasm.check_program"))
+            .await?
+        {
             return Err(DbError::reject(Reject::ProgramNotFound));
         }
         if let Some(module) = self.get(txid) {
+            tracing::Span::current().record("cached", true);
             return Ok(module);
         }
-        let wasm = self.wasm(access, root, txid).await?;
-        let module = Module::new(&self.engine, wasm.as_slice())
-            .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
-        Abi::check(&module)?;
+        tracing::Span::current().record("cached", false);
+        let wasm = self
+            .wasm(access, root, txid)
+            .instrument(tracing::debug_span!(target: "latency", "wasm.load_program"))
+            .await?;
+        let module = tracing::debug_span!(target: "latency", "wasm.compile", bytes = wasm.len())
+            .in_scope(|| {
+                let module = Module::new(&self.engine, wasm.as_slice())
+                    .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
+                Abi::check(&module)?;
+                Ok::<_, DbError>(module)
+            })?;
         self.cache(*txid, module.clone());
         Ok(module)
     }

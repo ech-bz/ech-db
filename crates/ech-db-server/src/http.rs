@@ -50,6 +50,9 @@ impl Server {
         }
     }
 
+    #[tracing::instrument(target = "latency", level = "debug", name = "query.server", skip_all,
+        fields(root = %root, txid = tracing::field::Empty, function = tracing::field::Empty,
+            input_bytes = body.len()))]
     async fn query_request(
         State(server): State<Arc<Server>>,
         Path(root): Path<String>,
@@ -59,12 +62,17 @@ impl Server {
             Ok(root) => root,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
-        let request = match bcs::from_bytes::<Request>(&body) {
+        let request = match tracing::debug_span!(target: "latency", "query.decode_request")
+            .in_scope(|| bcs::from_bytes::<Request>(&body))
+        {
             Ok(request) => request,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
+        tracing::Span::current().record("function", &request.tx.user.call.function);
         match server.query(root, request).await {
-            Ok(outcome) => Self::encoded(&outcome),
+            Ok(outcome) => tracing::debug_span!(target: "latency", "query.encode_response",
+                result_bytes = outcome.result.len())
+            .in_scope(|| Self::encoded(&outcome)),
             Err(error) => ApiError::from(error).into_response(),
         }
     }
