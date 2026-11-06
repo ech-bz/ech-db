@@ -7,12 +7,12 @@ use crate::server::Server;
 
 impl Server {
     pub async fn history(&self, root: Root, history: History) -> Result<Vec<Record>, DbError> {
+        let mut view = self.db.view()?;
         loop {
-            let view = self.db.view()?;
             match Log::page(&view, &root, &history).await {
                 Ok(records) => return Ok(records),
                 Err(DbError::Reject(reject)) => return Err(DbError::Reject(reject)),
-                Err(DbError::Fdb(error)) => self.db.pause(error).await?,
+                Err(DbError::Fdb(error)) => view = view.retry(error).await?,
             }
         }
     }

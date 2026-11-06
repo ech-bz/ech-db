@@ -3,7 +3,7 @@ use std::time::Instant;
 use bcs::to_bytes;
 
 use ech_db_protocol::error::Reject;
-use ech_db_protocol::id::Root;
+use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Chunks, Outcome, Request};
 
 use crate::error::DbError;
@@ -15,16 +15,21 @@ impl Server {
     #[tracing::instrument(skip_all, fields(%root, function = %request.tx.user.call.function, txid = tracing::field::Empty))]
     pub async fn append(&self, root: Root, request: Request) -> Result<Outcome, DbError> {
         let started = Instant::now();
+        let txid = request
+            .tx
+            .txid(&root)
+            .map_err(|_| DbError::reject(Reject::BadRequest))?;
+        tracing::Span::current().record("txid", tracing::field::display(txid));
+        let mut edit = self.db.edit()?;
         let mut attempts = 0u64;
         let outcome = loop {
             attempts += 1;
-            let edit = self.db.edit()?;
-            let outcome = match self.apply_append(&edit, &root, &request).await {
+            let outcome = match self.apply_append(&edit, &root, &txid, &request).await {
                 Ok(outcome) => outcome,
                 Err(DbError::Reject(reject)) => return Err(DbError::Reject(reject)),
                 Err(DbError::Fdb(error)) => {
                     tracing::info!(attempts, %error, phase = "apply", "retrying append");
-                    self.db.pause(error).await?;
+                    edit = edit.retry(error).await?;
                     continue;
                 }
             };
@@ -46,11 +51,11 @@ impl Server {
                     if Log::exists(&self.db.view()?, &root, &outcome.txid).await? {
                         break outcome;
                     }
-                    self.db.pause(error).await?;
+                    edit = error.retry().await?;
                 }
                 Err(error) => {
                     tracing::info!(attempts, %error, phase = "commit", "retrying append");
-                    self.db.pause(error).await?;
+                    edit = error.retry().await?;
                 }
             }
         };
@@ -65,19 +70,15 @@ impl Server {
         &self,
         edit: &Edit,
         root: &Root,
+        txid: &Txid,
         request: &Request,
     ) -> Result<Outcome, DbError> {
         let started = Instant::now();
         request.verify(root).map_err(DbError::Reject)?;
-        let txid = request
-            .tx
-            .txid(root)
-            .map_err(|_| DbError::reject(Reject::BadRequest))?;
-        tracing::Span::current().record("txid", tracing::field::display(txid));
         let verify_ms = started.elapsed().as_secs_f64() * 1000.0;
         let lookup_started = Instant::now();
         let (exists, prepared) = futures::join!(
-            Log::exists(edit, root, &txid),
+            Log::exists(edit, root, txid),
             self.prepare_program(edit, root, request),
         );
         if exists? {
@@ -91,14 +92,14 @@ impl Server {
         }
         let execution_started = Instant::now();
         let result = self
-            .execute_prepared(edit, root, &txid, request, prepared)
+            .execute_prepared(edit, root, txid, request, prepared)
             .await?;
         let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
         if result.len() > Chunks::MAX_RESULT {
             return Err(DbError::reject(Reject::ResourceLimit));
         }
         let stage_started = Instant::now();
-        Log::store(edit, root, &txid, &body, &result)?;
+        Log::store(edit, root, txid, &body, &result)?;
         let stage_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
         if started.elapsed().as_millis() >= 100 {
             tracing::info!(
@@ -109,6 +110,9 @@ impl Server {
                 "slow append preparation"
             );
         }
-        Ok(Outcome { txid, result })
+        Ok(Outcome {
+            txid: *txid,
+            result,
+        })
     }
 }

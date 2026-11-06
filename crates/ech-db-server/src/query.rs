@@ -8,12 +8,12 @@ use crate::server::Server;
 
 impl Server {
     pub async fn query(&self, root: Root, request: Request) -> Result<Outcome, DbError> {
+        let mut view = self.db.view()?;
         loop {
-            let view = self.db.view()?;
             match self.apply_query(&view, &root, &request).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(DbError::Reject(reject)) => return Err(DbError::Reject(reject)),
-                Err(DbError::Fdb(error)) => self.db.pause(error).await?,
+                Err(DbError::Fdb(error)) => view = view.retry(error).await?,
             }
         }
     }

@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use foundationdb::options::{MutationType, StreamingMode};
-use foundationdb::{Database, FdbError, RangeOption, Transaction};
+use foundationdb::{Database, FdbError, RangeOption, Transaction, TransactionCommitError};
 use futures::TryStreamExt;
 use serde::Serialize;
 
@@ -73,11 +73,6 @@ impl Db {
     pub fn edit(&self) -> Result<Edit, DbError> {
         Ok(Edit { view: self.view()? })
     }
-
-    pub async fn pause(&self, error: FdbError) -> Result<(), DbError> {
-        let trx = self.database.create_trx()?;
-        trx.on_error(error).await.map(|_| ()).map_err(DbError::Fdb)
-    }
 }
 
 pub struct View {
@@ -85,6 +80,12 @@ pub struct View {
 }
 
 impl View {
+    pub async fn retry(self, error: FdbError) -> Result<Self, FdbError> {
+        Ok(Self {
+            trx: self.trx.on_error(error).await?,
+        })
+    }
+
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
         self.trx
             .get(key, false)
@@ -179,6 +180,12 @@ pub struct Edit {
 }
 
 impl Edit {
+    pub async fn retry(self, error: FdbError) -> Result<Self, FdbError> {
+        Ok(Self {
+            view: self.view.retry(error).await?,
+        })
+    }
+
     pub fn set(&self, key: &[u8], value: &[u8]) {
         self.view.trx.set(key, value);
     }
@@ -201,13 +208,31 @@ impl Edit {
             .atomic_op(key, &[0u8; 14], MutationType::SetVersionstampedValue);
     }
 
-    pub async fn commit(self) -> Result<(), FdbError> {
+    pub async fn commit(self) -> Result<(), CommitError> {
         self.view
             .trx
             .commit()
             .await
             .map(|_| ())
-            .map_err(FdbError::from)
+            .map_err(CommitError)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct CommitError(TransactionCommitError);
+
+impl CommitError {
+    pub fn is_maybe_committed(&self) -> bool {
+        self.0.is_maybe_committed()
+    }
+
+    pub async fn retry(self) -> Result<Edit, FdbError> {
+        Ok(Edit {
+            view: View {
+                trx: self.0.on_error().await?,
+            },
+        })
     }
 }
 
