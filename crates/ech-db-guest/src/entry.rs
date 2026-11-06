@@ -24,12 +24,10 @@ where
         Ok(bytes) => crate::CallOutput::Ok(bytes),
         Err(bytes) => crate::CallOutput::Err(bytes),
     };
-    let encoded = host::encode_call_output(&output);
+    let mut encoded = host::encode_call_output(&output);
     let len = encoded.len();
-    let ptr = alloc(len as i32);
-    unsafe {
-        core::ptr::copy_nonoverlapping(encoded.as_ptr(), ptr as u32 as usize as *mut u8, len);
-    }
+    let ptr = encoded.as_mut_ptr();
+    core::mem::forget(encoded);
     (((ptr as u32 as u64) << 32) | (len as u32 as u64)) as i64
 }
 

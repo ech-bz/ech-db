@@ -16,6 +16,7 @@ wasmi.workspace = true
 wasmi_core.workspace = true
 bcs.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 axum.workspace = true

@@ -150,7 +150,13 @@ impl Executor {
                     .await?;
                 let bytes =
                     tracing::debug_span!(target: "latency", "host.encode_get", keys = count)
-                        .in_scope(|| to_bytes(&values))
+                        .in_scope(|| {
+                            let values: Vec<_> = values
+                                .iter()
+                                .map(|value| value.as_deref().map(serde_bytes::Bytes::new))
+                                .collect();
+                            to_bytes(&values)
+                        })
                         .map_err(|_| DbError::integrity())?;
                 Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
@@ -169,10 +175,12 @@ impl Executor {
                     tracing::debug_span!(target: "latency", "host.encode_range", rows = rows.len())
                         .in_scope(|| {
                             let mut values = Vec::with_capacity(rows.len());
-                            for (key, value) in rows {
-                                let suffix =
-                                    key.get(prefix..).ok_or_else(DbError::integrity)?.to_vec();
-                                values.push((suffix, value));
+                            for (key, value) in &rows {
+                                let suffix = key.get(prefix..).ok_or_else(DbError::integrity)?;
+                                values.push((
+                                    serde_bytes::Bytes::new(suffix),
+                                    serde_bytes::Bytes::new(value),
+                                ));
                             }
                             to_bytes(&values).map_err(|_| DbError::integrity())
                         })?;
@@ -276,11 +284,7 @@ impl Executor {
         if len > Profile::RESPONSE_LIMIT {
             return Err(DbError::reject(Reject::ResourceLimit));
         }
-        let mut buffer = vec![0u8; len];
-        memory
-            .read(store, ptr, &mut buffer)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        from_bytes(&buffer).map_err(|_| DbError::reject(Reject::Abi))
+        from_bytes(&memory.data(store)[ptr..end]).map_err(|_| DbError::reject(Reject::Abi))
     }
 }
 
@@ -381,13 +385,13 @@ impl Host {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         }
         let capacity = capacity as u32 as usize;
-        let Some(response) = caller.data().response.clone() else {
+        let Some(length) = caller.data().response.as_ref().map(Vec::len) else {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         };
-        if capacity < response.len() {
+        if capacity < length {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         }
-        let cost = Profile::HOST_CALL_BASE_FUEL + 2 * response.len() as u64;
+        let cost = Profile::HOST_CALL_BASE_FUEL + 2 * length as u64;
         if let Err(error) = Self::charge(&mut caller, cost) {
             return Err(Self::fail(&mut caller, error));
         }
@@ -396,18 +400,17 @@ impl Host {
             None => return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi))),
         };
         let offset = ptr as u32 as usize;
-        let end = match offset.checked_add(response.len()) {
+        let end = match offset.checked_add(length) {
             Some(end) => end,
             None => return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi))),
         };
         if end > memory.data_size(&caller) {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         }
-        if memory.write(&mut caller, offset, &response).is_err() {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
-        }
-        i32::try_from(response.len())
-            .map_err(|_| Self::fail(&mut caller, DbError::reject(Reject::Abi)))
+        let (buffer, state) = memory.data_and_store_mut(&mut caller);
+        let response = state.response.as_deref().expect("response exists");
+        buffer[offset..end].copy_from_slice(response);
+        i32::try_from(length).map_err(|_| Self::fail(&mut caller, DbError::reject(Reject::Abi)))
     }
 
     fn request(

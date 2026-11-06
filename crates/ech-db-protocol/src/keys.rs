@@ -21,6 +21,7 @@ impl Namespace {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ReadKey {
     pub namespace: Namespace,
+    #[serde(with = "serde_bytes")]
     pub suffix: Vec<u8>,
 }
 
@@ -49,7 +50,9 @@ impl ReadKey {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Range {
     pub namespace: Namespace,
+    #[serde(with = "serde_bytes")]
     pub start: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub end: Option<Vec<u8>>,
 }
 

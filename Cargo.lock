@@ -336,6 +336,7 @@ dependencies = [
  "ech-db-protocol",
  "foundationdb-tuple",
  "serde",
+ "serde_bytes",
 ]
 
 [[package]]
@@ -348,6 +349,7 @@ dependencies = [
  "foundationdb-tuple",
  "hex",
  "serde",
+ "serde_bytes",
  "thiserror",
 ]
 
@@ -375,6 +377,7 @@ dependencies = [
  "foundationdb-tuple",
  "futures",
  "serde",
+ "serde_bytes",
  "thiserror",
  "tokio",
  "tracing",

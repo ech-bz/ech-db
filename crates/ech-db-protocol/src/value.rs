@@ -25,6 +25,7 @@ pub enum Program {
 pub struct Call {
     pub program: Program,
     pub function: String,
+    #[serde(with = "serde_bytes")]
     pub args: Vec<u8>,
 }
 
@@ -36,6 +37,7 @@ pub enum Author {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct UserPart {
+    #[serde(with = "serde_bytes")]
     pub ctx: Vec<u8>,
     pub call: Call,
     pub author: Author,
@@ -49,6 +51,7 @@ impl UserPart {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ServerPart {
+    #[serde(with = "serde_bytes")]
     pub ctx: Vec<u8>,
     pub proof: Proof,
 }
@@ -170,19 +173,21 @@ impl Request {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Outcome {
     pub txid: Txid,
+    #[serde(with = "serde_bytes")]
     pub result: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Record {
     pub tx: Tx,
+    #[serde(with = "serde_bytes")]
     pub result: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum CallOutput {
-    Ok(Vec<u8>),
-    Err(Vec<u8>),
+    Ok(#[serde(with = "serde_bytes")] Vec<u8>),
+    Err(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 pub struct Chunks;

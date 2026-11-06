@@ -10,4 +10,5 @@ crate-type = ["rlib", "cdylib"]
 ech-db-protocol = { path = "../ech-db-protocol" }
 bcs.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 foundationdb-tuple.workspace = true

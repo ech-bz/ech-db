@@ -1,5 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_bytes::{ByteBuf, Bytes};
 
 use ech_db_protocol::id::Root;
 use ech_db_protocol::keys::{Range, ReadKey};
@@ -24,10 +25,14 @@ impl Host {
     }
 
     pub fn get_raw(keys: &[ReadKey]) -> Vec<Option<Vec<u8>>> {
-        let input = to_bcs_bytes(&keys.to_vec());
+        let input = to_bcs_bytes(keys);
         let response_len = unsafe { get(input.as_ptr() as i32, input.len() as i32) };
         let response = copy_response(response_len as u32 as usize);
-        from_bcs_bytes(&response)
+        let values: Vec<Option<ByteBuf>> = from_bcs_bytes(&response);
+        values
+            .into_iter()
+            .map(|value| value.map(ByteBuf::into_vec))
+            .collect()
     }
 
     pub fn get<T: DeserializeOwned>(keys: &[ReadKey]) -> Vec<Option<T>> {
@@ -41,7 +46,10 @@ impl Host {
         let input = to_bcs_bytes(range);
         let response_len = unsafe { get_range(input.as_ptr() as i32, input.len() as i32) };
         let response = copy_response(response_len as u32 as usize);
-        from_bcs_bytes(&response)
+        let rows: Vec<(ByteBuf, ByteBuf)> = from_bcs_bytes(&response);
+        rows.into_iter()
+            .map(|(key, value)| (key.into_vec(), value.into_vec()))
+            .collect()
     }
 
     pub fn range<T: DeserializeOwned>(range: &Range) -> Vec<(Vec<u8>, T)> {
@@ -52,7 +60,7 @@ impl Host {
     }
 
     pub fn put(user_key: &[u8], value: &[u8]) {
-        let input = to_bcs_bytes(&(user_key.to_vec(), value.to_vec()));
+        let input = to_bcs_bytes(&(Bytes::new(user_key), Bytes::new(value)));
         unsafe { set(input.as_ptr() as i32, input.len() as i32) };
     }
 
@@ -62,7 +70,7 @@ impl Host {
     }
 
     pub fn del(user_key: &[u8]) {
-        let input = to_bcs_bytes(&user_key.to_vec());
+        let input = to_bcs_bytes(Bytes::new(user_key));
         unsafe { del(input.as_ptr() as i32, input.len() as i32) };
     }
 
@@ -73,17 +81,9 @@ impl Host {
 }
 
 fn copy_response(response_len: usize) -> Vec<u8> {
-    let ptr = crate::entry::alloc(response_len as i32);
-    let copied = unsafe { response_copy(ptr, response_len as i32) };
-    assert_eq!(copied as u32 as usize, response_len);
     let mut buffer = vec![0u8; response_len];
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            ptr as u32 as usize as *const u8,
-            buffer.as_mut_ptr(),
-            response_len,
-        );
-    }
+    let copied = unsafe { response_copy(buffer.as_mut_ptr() as i32, response_len as i32) };
+    assert_eq!(copied as u32 as usize, response_len);
     buffer
 }
 
