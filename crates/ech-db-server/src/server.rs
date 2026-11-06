@@ -8,7 +8,7 @@ use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
 
 use crate::error::DbError;
-use crate::exec::Executor;
+use crate::exec::{Executor, ReadMetrics};
 use crate::fdb::{Db, Reader};
 use crate::programs::Programs;
 use crate::wasm::Profile;
@@ -90,7 +90,11 @@ impl Server {
                 load_ms: module_ms,
             } => {
                 let execution_started = Instant::now();
-                let result = self.executor.run(access, &module, root, request).await;
+                let mut reads = ReadMetrics::default();
+                let result = self
+                    .executor
+                    .run(access, &module, root, request, &mut reads)
+                    .await;
                 let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
                 if module_ms + execution_ms >= 100.0 {
                     tracing::info!(
@@ -101,6 +105,12 @@ impl Server {
                         read_only = access.read_only(),
                         module_ms,
                         execution_ms,
+                        get_calls = reads.get_calls,
+                        get_keys = reads.get_keys,
+                        get_ms = reads.get_time.as_secs_f64() * 1000.0,
+                        range_calls = reads.range_calls,
+                        range_rows = reads.range_rows,
+                        range_ms = reads.range_time.as_secs_f64() * 1000.0,
                         success = result.is_ok(),
                         "slow program execution"
                     );

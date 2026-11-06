@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use bcs::{from_bytes, to_bytes};
 use futures::{stream, StreamExt, TryStreamExt};
 use wasmi::errors::ErrorKind;
@@ -18,6 +20,16 @@ use crate::wasm::{Profile, ProfileLimiter};
 const SUSPEND: i32 = 0x0ECDB;
 const CONCURRENT_READS: usize = 64;
 
+#[derive(Default)]
+pub struct ReadMetrics {
+    pub get_calls: usize,
+    pub get_keys: usize,
+    pub get_time: Duration,
+    pub range_calls: usize,
+    pub range_rows: usize,
+    pub range_time: Duration,
+}
+
 pub struct Executor {
     engine: Engine,
 }
@@ -33,6 +45,7 @@ impl Executor {
         module: &Module,
         root: &Root,
         request: &Request,
+        reads: &mut ReadMetrics,
     ) -> Result<Vec<u8>, DbError> {
         let mut linker = <Linker<ExecState>>::new(&self.engine);
         linker
@@ -103,7 +116,7 @@ impl Executor {
                         Some(pending) => pending,
                         None => return Err(DbError::reject(Reject::Abi)),
                     };
-                    step = Self::resume(access, &mut store, trap, pending).await?;
+                    step = Self::resume(access, &mut store, trap, pending, reads).await?;
                 }
             }
         };
@@ -118,10 +131,13 @@ impl Executor {
         store: &mut Store<ExecState>,
         typed: TypedResumableCallHostTrap<i64>,
         pending: Pending,
+        metrics: &mut ReadMetrics,
     ) -> Result<TypedResumableCall<i64>, DbError> {
         let root = store.data().root;
         match pending {
             Pending::Get(keys) => {
+                metrics.get_calls += 1;
+                metrics.get_keys += keys.len();
                 let reads: Vec<_> = keys
                     .into_iter()
                     .map(|key| {
@@ -129,10 +145,13 @@ impl Executor {
                         async move { access.get(&key).await }
                     })
                     .collect();
-                let values: Vec<Option<Vec<u8>>> = stream::iter(reads)
+                let started = Instant::now();
+                let values: Result<Vec<Option<Vec<u8>>>, DbError> = stream::iter(reads)
                     .buffered(CONCURRENT_READS)
                     .try_collect()
-                    .await?;
+                    .await;
+                metrics.get_time += started.elapsed();
+                let values = values?;
                 let bytes = to_bytes(&values).map_err(|_| DbError::integrity())?;
                 Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
@@ -146,7 +165,12 @@ impl Executor {
             Pending::Range(range) => {
                 let (begin, end) = range.physical(&root);
                 let prefix = begin.len() - range.start.len();
-                let rows = access.scan(&begin, &end, None).await?;
+                metrics.range_calls += 1;
+                let started = Instant::now();
+                let rows = access.scan(&begin, &end, None).await;
+                metrics.range_time += started.elapsed();
+                let rows = rows?;
+                metrics.range_rows += rows.len();
                 let mut values = Vec::with_capacity(rows.len());
                 for (key, value) in rows {
                     let suffix = key.get(prefix..).ok_or_else(DbError::integrity)?.to_vec();
