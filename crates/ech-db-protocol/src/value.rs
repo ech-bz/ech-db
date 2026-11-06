@@ -8,7 +8,10 @@ use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
 use crate::proof::{Equation, Proof, Statement, Term};
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(
+    crate::Bind, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug,
+)]
+#[bind(crate = "crate")]
 pub struct Esid {
     pub tweak: [u8; 32],
     pub c1: [u8; 32],

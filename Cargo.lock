@@ -334,9 +334,17 @@ version = "0.1.0"
 dependencies = [
  "bcs",
  "ech-db-protocol",
- "foundationdb-tuple",
  "serde",
  "serde_bytes",
+]
+
+[[package]]
+name = "ech-db-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -346,6 +354,7 @@ dependencies = [
  "bcs",
  "blake2b_simd",
  "curve25519-dalek",
+ "ech-db-macros",
  "foundationdb-tuple",
  "hex",
  "serde",

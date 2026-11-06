@@ -18,8 +18,8 @@ impl Abi {
                 return Err(DbError::reject(Reject::Abi));
             };
             let (params, results) = match import.name() {
-                "get" | "get_range" | "response_copy" => (2, 1),
-                "set" | "del" | "abort" => (2, 0),
+                "map_get" | "map_range" | "tx_get" | "response_copy" => (2, 1),
+                "map_insert" | "map_remove" | "abort" => (2, 0),
                 "read_only" => (0, 1),
                 _ => return Err(DbError::reject(Reject::Abi)),
             };

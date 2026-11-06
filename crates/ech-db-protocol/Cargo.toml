@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ech-db-macros = { path = "../ech-db-macros" }
 bcs.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true

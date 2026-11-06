@@ -8,12 +8,14 @@ use wasmi::{
 };
 
 use ech_db_protocol::error::Reject;
-use ech_db_protocol::id::Root;
-use ech_db_protocol::keys::{Range, ReadKey};
+use ech_db_protocol::id::{Root, Txid};
+use ech_db_protocol::map::{MapKey, MapRange};
 use ech_db_protocol::value::{CallOutput, Request};
 
+use crate::big_map::BigMap;
 use crate::error::DbError;
 use crate::fdb::{Mutator, Reader};
+use crate::log::Log;
 use crate::timing::Timer;
 use crate::wasm::{Profile, ProfileLimiter};
 
@@ -42,19 +44,22 @@ impl Executor {
             .in_scope(|| {
                 let mut linker = <Linker<ExecState>>::new(&self.engine);
                 linker
-                    .func_wrap("ech", "get", Host::get)
+                    .func_wrap("ech", "map_get", Host::map_get)
                     .map_err(|_| DbError::reject(Reject::Abi))?;
                 linker
-                    .func_wrap("ech", "get_range", Host::get_range)
+                    .func_wrap("ech", "map_range", Host::map_range)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "tx_get", Host::tx_get)
                     .map_err(|_| DbError::reject(Reject::Abi))?;
                 linker
                     .func_wrap("ech", "response_copy", Host::response_copy)
                     .map_err(|_| DbError::reject(Reject::Abi))?;
                 linker
-                    .func_wrap("ech", "set", Host::set)
+                    .func_wrap("ech", "map_insert", Host::map_insert)
                     .map_err(|_| DbError::reject(Reject::Abi))?;
                 linker
-                    .func_wrap("ech", "del", Host::del)
+                    .func_wrap("ech", "map_remove", Host::map_remove)
                     .map_err(|_| DbError::reject(Reject::Abi))?;
                 linker
                     .func_wrap("ech", "abort", Host::abort)
@@ -143,7 +148,7 @@ impl Executor {
                 let reads: Vec<_> = keys
                     .into_iter()
                     .map(|key| {
-                        let key = key.physical(&root);
+                        let key = BigMap::physical(&root, &key);
                         async move { access.get(&key).await }
                     })
                     .collect();
@@ -177,12 +182,16 @@ impl Executor {
             }
             Pending::Range(range) => {
                 let read = Timer::new("db_range");
-                let (begin, end) = range.physical(&root);
-                let prefix = begin.len() - range.start.len();
-                let rows = access
-                    .scan(&begin, &end, None)
-                    .instrument(tracing::debug_span!(target: "latency", "fdb.range"))
-                    .await?;
+                let map = BigMap::open(&root, &range.map);
+                let (begin, end) = map.bounds(&range);
+                let rows = if range.limit == 0 || begin >= end {
+                    Vec::new()
+                } else {
+                    access
+                        .scan(&begin, &end, Some(u64::from(range.limit)))
+                        .instrument(tracing::debug_span!(target: "latency", "fdb.range"))
+                        .await?
+                };
                 drop(read);
                 let encode = Timer::new("db_host_encode");
                 let bytes =
@@ -190,7 +199,7 @@ impl Executor {
                         .in_scope(|| {
                             let mut values = Vec::with_capacity(rows.len());
                             for (key, value) in &rows {
-                                let suffix = key.get(prefix..).ok_or_else(DbError::integrity)?;
+                                let suffix = map.logical(key).ok_or_else(DbError::integrity)?;
                                 values.push((
                                     serde_bytes::Bytes::new(suffix),
                                     serde_bytes::Bytes::new(value),
@@ -206,7 +215,7 @@ impl Executor {
                 Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Set(user_key, value) => {
-                let key = ReadKey::kv(user_key).physical(&root);
+                let key = BigMap::physical(&root, &user_key);
                 let total = store
                     .data()
                     .writes
@@ -220,9 +229,19 @@ impl Executor {
                 Self::resume_wasm(store, typed, &[])
             }
             Pending::Del(user_key) => {
-                let key = ReadKey::kv(user_key).physical(&root);
+                let key = BigMap::physical(&root, &user_key);
                 access.writes().clear(&key)?;
                 Self::resume_wasm(store, typed, &[])
+            }
+            Pending::Tx(txid) => {
+                let read = Timer::new("db_tx");
+                let bytes = Log::body(access, &root, &txid).await?;
+                drop(read);
+                Self::charge(store, bytes.len() as u64)?;
+                let length = i32::try_from(bytes.len())
+                    .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
+                store.data_mut().response = Some(bytes);
+                Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Abort(bytes) => Err(DbError::reject(Reject::Application { bytes })),
         }
@@ -333,52 +352,69 @@ impl ExecState {
 }
 
 enum Pending {
-    Get(Vec<ReadKey>),
-    Range(Range),
-    Set(Vec<u8>, Vec<u8>),
-    Del(Vec<u8>),
+    Get(Vec<MapKey>),
+    Range(MapRange),
+    Set(MapKey, Vec<u8>),
+    Del(MapKey),
+    Tx(Txid),
     Abort(Vec<u8>),
 }
 
 struct Host;
 
 impl Host {
-    fn get(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<i32, wasmi::Error> {
+    fn map_get(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<i32, wasmi::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
-            from_bytes::<Vec<ReadKey>>(bytes)
+            from_bytes::<Vec<MapKey>>(bytes)
                 .map(Pending::Get)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
     }
 
-    fn get_range(
+    fn map_range(
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
     ) -> Result<i32, wasmi::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
-            from_bytes::<Range>(bytes)
+            from_bytes::<MapRange>(bytes)
                 .map(Pending::Range)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
     }
 
-    fn set(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<(), wasmi::Error> {
+    fn map_insert(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<(), wasmi::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
-            from_bytes::<(Vec<u8>, Vec<u8>)>(bytes)
-                .map(|(key, value)| Pending::Set(key, value))
+            from_bytes::<(MapKey, serde_bytes::ByteBuf)>(bytes)
+                .map(|(key, value)| Pending::Set(key, value.into_vec()))
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
         .map(|_| ())
     }
 
-    fn del(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<(), wasmi::Error> {
+    fn map_remove(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<(), wasmi::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
-            from_bytes::<Vec<u8>>(bytes)
+            from_bytes::<MapKey>(bytes)
                 .map(Pending::Del)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
         .map(|_| ())
+    }
+
+    fn tx_get(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<i32, wasmi::Error> {
+        Self::request(&mut caller, ptr, len, |bytes| {
+            from_bytes::<Txid>(bytes)
+                .map(Pending::Tx)
+                .map_err(|_| DbError::reject(Reject::Abi))
+        })
     }
 
     fn abort(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<(), wasmi::Error> {

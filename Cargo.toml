@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ech-db-protocol",
     "crates/ech-db-guest",
+    "crates/ech-db-macros",
     "crates/ech-db-server",
     "crates/ech-db-sdk",
 ]

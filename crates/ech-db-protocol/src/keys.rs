@@ -1,93 +1,6 @@
 use foundationdb_tuple::{pack, pack_with_versionstamp, Bytes, Versionstamp};
-use serde::{Deserialize, Serialize};
 
 use crate::id::{Root, Txid};
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Namespace {
-    Kv,
-    Tx,
-}
-
-impl Namespace {
-    pub fn name(self) -> &'static str {
-        match self {
-            Namespace::Kv => "kv",
-            Namespace::Tx => "tx",
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct ReadKey {
-    pub namespace: Namespace,
-    #[serde(with = "serde_bytes")]
-    pub suffix: Vec<u8>,
-}
-
-impl ReadKey {
-    pub fn kv(user_key: Vec<u8>) -> Self {
-        Self {
-            namespace: Namespace::Kv,
-            suffix: user_key,
-        }
-    }
-
-    pub fn tx(suffix: Vec<u8>) -> Self {
-        Self {
-            namespace: Namespace::Tx,
-            suffix,
-        }
-    }
-
-    pub fn physical(&self, root: &Root) -> Vec<u8> {
-        let mut key = Keys::namespace(root, self.namespace);
-        key.extend_from_slice(&self.suffix);
-        key
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Range {
-    pub namespace: Namespace,
-    #[serde(with = "serde_bytes")]
-    pub start: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    pub end: Option<Vec<u8>>,
-}
-
-impl Range {
-    pub fn kv(start: Vec<u8>, end: Option<Vec<u8>>) -> Self {
-        Self {
-            namespace: Namespace::Kv,
-            start,
-            end,
-        }
-    }
-
-    pub fn tx(start: Vec<u8>, end: Option<Vec<u8>>) -> Self {
-        Self {
-            namespace: Namespace::Tx,
-            start,
-            end,
-        }
-    }
-
-    pub fn physical(&self, root: &Root) -> (Vec<u8>, Vec<u8>) {
-        let prefix = Keys::namespace(root, self.namespace);
-        let mut begin = prefix.clone();
-        begin.extend_from_slice(&self.start);
-        let end = match &self.end {
-            Some(end) => {
-                let mut key = prefix;
-                key.extend_from_slice(end);
-                key
-            }
-            None => Prefix::successor(&prefix).expect("namespace prefix is not all 0xff"),
-        };
-        (begin, end)
-    }
-}
 
 pub struct Prefix;
 
@@ -108,16 +21,8 @@ impl Prefix {
 pub struct Keys;
 
 impl Keys {
-    pub fn namespace(root: &Root, namespace: Namespace) -> Vec<u8> {
-        pack(&(Bytes::from(root.as_bytes()), namespace.name()))
-    }
-
     pub fn kv(root: &Root) -> Vec<u8> {
-        Self::namespace(root, Namespace::Kv)
-    }
-
-    pub fn tx(root: &Root) -> Vec<u8> {
-        Self::namespace(root, Namespace::Tx)
+        pack(&(Bytes::from(root.as_bytes()), "kv"))
     }
 
     pub fn body(root: &Root, txid: &Txid, seq: u64) -> Vec<u8> {
