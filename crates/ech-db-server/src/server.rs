@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::serve::ListenerExt;
 use tracing::Instrument;
 use wasmi::Module;
 
@@ -35,7 +36,13 @@ impl Server {
     }
 
     pub async fn run(self: Arc<Self>, listen: SocketAddr) -> Result<(), std::io::Error> {
-        let listener = tokio::net::TcpListener::bind(listen).await?;
+        let listener = tokio::net::TcpListener::bind(listen)
+            .await?
+            .tap_io(|stream| {
+                if let Err(error) = stream.set_nodelay(true) {
+                    tracing::warn!(%error, "failed to enable TCP_NODELAY");
+                }
+            });
         axum::serve(listener, self.router()).await
     }
 
