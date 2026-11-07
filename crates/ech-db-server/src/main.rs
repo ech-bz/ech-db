@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
+use foundationdb::api::FdbApiBuilder;
+use foundationdb::options::NetworkOption;
 use tracing_subscriber::EnvFilter;
 
 use ech_db_server::fdb::Db;
@@ -24,7 +26,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .init();
     let args = Args::parse();
-    let _network = unsafe { foundationdb::boot() };
+    let network = FdbApiBuilder::default()
+        .build()?
+        .set_option(NetworkOption::Knob(
+            "load_balance_zone_id_locality_enabled=1".to_owned(),
+        ))?;
+    let _network = unsafe { network.boot()? };
     let db = Db::open(&args.cluster_file, args.machine_id.as_deref())?;
     if let Some(machine_id) = &args.machine_id {
         tracing::info!(%machine_id, "configured FDB client locality");
