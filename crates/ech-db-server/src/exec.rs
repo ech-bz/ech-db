@@ -1,13 +1,10 @@
 use std::time::{Duration, Instant};
 
 use bcs::{from_bytes, to_bytes};
+use futures::channel::{mpsc, oneshot};
 use futures::{stream, StreamExt, TryStreamExt};
 use tracing::Instrument;
-use wasmi::errors::ErrorKind;
-use wasmi::{
-    Caller, Engine, Linker, Memory, Module, Store, TrapCode, TypedResumableCall,
-    TypedResumableCallHostTrap, Val,
-};
+use wasmtime::{Caller, Engine, Linker, Memory, Module, Store, Trap};
 
 use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
@@ -21,16 +18,39 @@ use crate::log::Log;
 use crate::timing::{self, Timer};
 use crate::wasm::{Profile, ProfileLimiter};
 
-const SUSPEND: i32 = 0x0ECDB;
 const CONCURRENT_READS: usize = 64;
 
 pub struct Executor {
     engine: Engine,
+    linker: Linker<ExecState>,
 }
 
 impl Executor {
-    pub fn new(engine: Engine) -> Self {
-        Self { engine }
+    pub fn new(engine: Engine) -> Result<Self, wasmtime::Error> {
+        let mut linker = Linker::new(&engine);
+        linker.func_wrap_async("ech", "map_get", |caller, (ptr, len)| {
+            Box::new(Host::map_get(caller, ptr, len))
+        })?;
+        linker.func_wrap_async("ech", "map_range", |caller, (ptr, len)| {
+            Box::new(Host::map_range(caller, ptr, len))
+        })?;
+        linker.func_wrap_async("ech", "tx_get", |caller, (ptr, len)| {
+            Box::new(Host::tx_get(caller, ptr, len))
+        })?;
+        linker.func_wrap_async("ech", "map_insert", |caller, (ptr, len)| {
+            Box::new(Host::map_insert(caller, ptr, len))
+        })?;
+        linker.func_wrap_async("ech", "map_remove", |caller, (ptr, len)| {
+            Box::new(Host::map_remove(caller, ptr, len))
+        })?;
+        linker.func_wrap_async("ech", "abort", |caller, (ptr, len)| {
+            Box::new(Host::abort(caller, ptr, len))
+        })?;
+        linker.func_wrap("ech", "response_copy", Host::response_copy)?;
+        linker.func_wrap("ech", "read_only", Host::read_only)?;
+        linker.func_wrap("ech", "profile_enter", Host::profile_enter)?;
+        linker.func_wrap("ech", "profile_exit", Host::profile_exit)?;
+        Ok(Self { engine, linker })
     }
 
     pub async fn run<R: Reader>(
@@ -42,101 +62,67 @@ impl Executor {
     ) -> Result<Vec<u8>, DbError> {
         let _execute = Timer::new("db_execute");
         let setup = Timer::new("db_setup");
-        let (mut store, entry, ptr, length) = tracing::debug_span!(target: "latency", "wasm.setup")
-            .in_scope(|| {
-                let mut linker = <Linker<ExecState>>::new(&self.engine);
-                linker
-                    .func_wrap("ech", "map_get", Host::map_get)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "map_range", Host::map_range)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "tx_get", Host::tx_get)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "response_copy", Host::response_copy)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "map_insert", Host::map_insert)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "map_remove", Host::map_remove)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "abort", Host::abort)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "read_only", Host::read_only)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "profile_enter", Host::profile_enter)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                linker
-                    .func_wrap("ech", "profile_exit", Host::profile_exit)
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                let mut store = Store::new(&self.engine, ExecState::new(*root, access.read_only()));
-                store.limiter(|state| &mut state.limits);
-                store
-                    .set_fuel(Profile::FUEL)
-                    .map_err(|_| DbError::reject(Reject::VmTrap))?;
-                let instance = linker
-                    .instantiate_and_start(&mut store, module)
-                    .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
-                let memory = instance
-                    .get_memory(&store, "memory")
-                    .ok_or_else(|| DbError::reject(Reject::Abi))?;
-                store.data_mut().memory = Some(memory);
-                let alloc = instance
-                    .get_typed_func::<i32, i32>(&store, "ech_alloc")
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                let entry = instance
-                    .get_typed_func::<(i32, i32), i64>(&store, "ech_call")
-                    .map_err(|_| DbError::reject(Reject::Abi))?;
-                let payload =
-                    to_bytes(&(root, request)).map_err(|_| DbError::reject(Reject::Abi))?;
-                let length = i32::try_from(payload.len())
-                    .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
-                store.data_mut().in_alloc = true;
-                let ptr = match alloc.call(&mut store, length) {
-                    Ok(ptr) => ptr,
-                    Err(error) => {
-                        store.data_mut().in_alloc = false;
-                        return Err(Self::trap(&mut store, &error));
-                    }
-                };
-                store.data_mut().in_alloc = false;
-                Self::write(&mut store, ptr, &payload)?;
-                Ok::<_, DbError>((store, entry, ptr, length))
-            })?;
+        let (requests, mut pending) = mpsc::unbounded();
+        let mut store = Store::new(&self.engine, ExecState::new(access.read_only(), requests));
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(Profile::FUEL)
+            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+        let instance = self
+            .linker
+            .instantiate_async(&mut store, module)
+            .instrument(tracing::debug_span!(target: "latency", "wasm.setup"))
+            .await
+            .map_err(|error| Self::trap(&mut store, error))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+        store.data_mut().memory = Some(memory);
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "ech_alloc")
+            .map_err(|_| DbError::reject(Reject::Abi))?;
+        let entry = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "ech_call")
+            .map_err(|_| DbError::reject(Reject::Abi))?;
+        let payload = to_bytes(&(root, request)).map_err(|_| DbError::reject(Reject::Abi))?;
+        let length =
+            i32::try_from(payload.len()).map_err(|_| DbError::reject(Reject::ResourceLimit))?;
+        store.data_mut().in_alloc = true;
+        let allocated = alloc.call_async(&mut store, length).await;
+        store.data_mut().in_alloc = false;
+        let ptr = allocated.map_err(|error| Self::trap(&mut store, error))?;
+        Self::write(&mut store, ptr, &payload)?;
         drop(setup);
         let fuel = store
             .get_fuel()
             .map_err(|_| DbError::reject(Reject::VmTrap))?;
-        let call = Timer::new("db_wasm");
-        let mut step = match tracing::debug_span!(target: "latency", "wasm.call")
-            .in_scope(|| entry.call_resumable(&mut store, (ptr, length)))
-        {
-            Ok(step) => step,
-            Err(error) => return Err(Self::trap(&mut store, &error)),
-        };
-        Self::finish_wasm(call, &store, fuel, length as usize, &step)?;
-        let value = loop {
-            match step {
-                TypedResumableCall::Finished(value) => break value,
-                TypedResumableCall::OutOfFuel(_) => return Err(DbError::reject(Reject::OutOfFuel)),
-                TypedResumableCall::HostTrap(trap) => {
-                    if let Some(fatal) = store.data_mut().fatal.take() {
-                        return Err(fatal);
+        store.data_mut().segment = Some(WasmSegment::new(fuel, payload.len()));
+        let mut writes = 0;
+        let result = {
+            let call = entry.call_async(&mut store, (ptr, length));
+            tokio::pin!(call);
+            loop {
+                tokio::select! {
+                    result = &mut call => break result,
+                    operation = pending.next() => {
+                        let Some(Operation { request, reply }) = operation else {
+                            return Err(DbError::integrity());
+                        };
+                        let result = Self::perform(access, root, &mut writes, request).await;
+                        if reply.send(result).is_err() {
+                            return Err(DbError::integrity());
+                        }
                     }
-                    let pending = match store.data_mut().pending.take() {
-                        Some(pending) => pending,
-                        None => return Err(DbError::reject(Reject::Abi)),
-                    };
-                    step = Self::resume(access, &mut store, trap, pending).await?;
                 }
             }
         };
+        let remaining = store
+            .get_fuel()
+            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+        if let Some(segment) = store.data_mut().segment.take() {
+            segment.finish(remaining, if result.is_ok() { "finished" } else { "trap" });
+        }
+        let value = result.map_err(|error| Self::trap(&mut store, error))?;
         let _decode = Timer::new("db_output_decode");
         match tracing::debug_span!(target: "latency", "wasm.decode_output")
             .in_scope(|| Self::output(&store, value))?
@@ -146,13 +132,12 @@ impl Executor {
         }
     }
 
-    async fn resume<R: Reader>(
+    async fn perform<R: Reader>(
         access: &R,
-        store: &mut Store<ExecState>,
-        typed: TypedResumableCallHostTrap<i64>,
+        root: &Root,
+        writes: &mut usize,
         pending: Pending,
-    ) -> Result<TypedResumableCall<i64>, DbError> {
-        let root = store.data().root;
+    ) -> Result<Option<Vec<u8>>, DbError> {
         match pending {
             Pending::Get(keys) => {
                 let started = Instant::now();
@@ -160,7 +145,7 @@ impl Executor {
                 let reads: Vec<_> = keys
                     .into_iter()
                     .map(|key| {
-                        let key = BigMap::physical(&root, &key);
+                        let key = BigMap::physical(root, &key);
                         async move {
                             let issued = Instant::now();
                             let value = access.get(&key).await?;
@@ -211,16 +196,14 @@ impl Executor {
                             to_bytes(&values)
                         })
                         .map_err(|_| DbError::integrity())?;
-                Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
-                store.data_mut().response = Some(bytes);
                 encode.finish(format!("get keys={count} bytes={length}"));
-                Self::resume_wasm(store, typed, &[Val::I32(length)])
+                Ok(Some(bytes))
             }
             Pending::Range(range) => {
                 let read = Timer::new("db_range");
-                let map = BigMap::open(&root, &range.map);
+                let map = BigMap::open(root, &range.map);
                 let (begin, end) = map.bounds(&range);
                 let rows = if range.limit == 0 || begin >= end {
                     Vec::new()
@@ -253,120 +236,48 @@ impl Executor {
                             }
                             to_bytes(&values).map_err(|_| DbError::integrity())
                         })?;
-                Self::charge(store, bytes.len() as u64)?;
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
-                store.data_mut().response = Some(bytes);
                 encode.finish(format!("range rows={} bytes={length}", rows.len()));
-                Self::resume_wasm(store, typed, &[Val::I32(length)])
+                Ok(Some(bytes))
             }
             Pending::Set(user_key, value) => {
-                let key = BigMap::physical(&root, &user_key);
-                let total = store
-                    .data()
-                    .writes
+                let key = BigMap::physical(root, &user_key);
+                let total = writes
                     .checked_add(key.len() + value.len())
                     .ok_or_else(|| DbError::reject(Reject::ResourceLimit))?;
                 if total > Profile::WRITE_LIMIT {
                     return Err(DbError::reject(Reject::ResourceLimit));
                 }
                 access.writes().put(&key, &value)?;
-                store.data_mut().writes = total;
-                Self::resume_wasm(store, typed, &[])
+                *writes = total;
+                Ok(None)
             }
             Pending::Del(user_key) => {
-                let key = BigMap::physical(&root, &user_key);
+                let key = BigMap::physical(root, &user_key);
                 access.writes().clear(&key)?;
-                Self::resume_wasm(store, typed, &[])
+                Ok(None)
             }
             Pending::Tx(txid) => {
                 let read = Timer::new("db_tx");
-                let bytes = Log::body(access, &root, &txid).await?;
+                let bytes = Log::body(access, root, &txid).await?;
                 drop(read);
-                Self::charge(store, bytes.len() as u64)?;
-                let length = i32::try_from(bytes.len())
-                    .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
-                store.data_mut().response = Some(bytes);
-                Self::resume_wasm(store, typed, &[Val::I32(length)])
+                Ok(Some(bytes))
             }
             Pending::Abort(bytes) => Err(DbError::reject(Reject::Application { bytes })),
         }
     }
 
-    #[tracing::instrument(target = "latency", level = "debug", name = "wasm.resume", skip_all,
-        fields(response_bytes = store.data().response.as_ref().map_or(0, Vec::len)))]
-    fn resume_wasm(
-        store: &mut Store<ExecState>,
-        typed: TypedResumableCallHostTrap<i64>,
-        values: &[Val],
-    ) -> Result<TypedResumableCall<i64>, DbError> {
-        let bytes = store.data().response.as_ref().map_or(0, Vec::len);
-        let fuel = store
-            .get_fuel()
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
-        let resume = Timer::new("db_wasm");
-        match typed.resume(&mut *store, values) {
-            Ok(next) => {
-                Self::finish_wasm(resume, store, fuel, bytes, &next)?;
-                Ok(next)
-            }
-            Err(error) => Err(Self::trap(store, &error)),
-        }
-    }
-
-    fn finish_wasm(
-        timer: Timer,
-        store: &Store<ExecState>,
-        fuel: u64,
-        bytes: usize,
-        step: &TypedResumableCall<i64>,
-    ) -> Result<(), DbError> {
-        let remaining = store
-            .get_fuel()
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
-        let next = match step {
-            TypedResumableCall::Finished(_) => "finished",
-            TypedResumableCall::OutOfFuel(_) => "out_of_fuel",
-            TypedResumableCall::HostTrap(_) => match store.data().pending.as_ref() {
-                Some(Pending::Get(_)) => "get",
-                Some(Pending::Range(_)) => "range",
-                Some(Pending::Set(_, _)) => "set",
-                Some(Pending::Del(_)) => "del",
-                Some(Pending::Tx(_)) => "tx",
-                Some(Pending::Abort(_)) => "abort",
-                None => "trap",
-            },
-        };
-        timer.finish(format!(
-            "input_bytes={bytes} fuel={} next={next}",
-            fuel.saturating_sub(remaining)
-        ));
-        Ok(())
-    }
-
-    fn trap(store: &mut Store<ExecState>, error: &wasmi::Error) -> DbError {
+    fn trap(store: &mut Store<ExecState>, error: wasmtime::Error) -> DbError {
         if let Some(fatal) = store.data_mut().fatal.take() {
             return fatal;
         }
-        match error.kind() {
-            ErrorKind::TrapCode(TrapCode::OutOfFuel) => DbError::reject(Reject::OutOfFuel),
-            ErrorKind::TrapCode(TrapCode::GrowthOperationLimited) => {
-                DbError::reject(Reject::ResourceLimit)
-            }
-            _ => DbError::reject(Reject::VmTrap),
+        if matches!(error.downcast_ref::<Trap>(), Some(Trap::OutOfFuel)) {
+            return DbError::reject(Reject::OutOfFuel);
         }
-    }
-
-    fn charge(store: &mut Store<ExecState>, fuel: u64) -> Result<(), DbError> {
-        let remaining = store
-            .get_fuel()
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
-        if remaining < fuel {
-            return Err(DbError::reject(Reject::OutOfFuel));
-        }
-        store
-            .set_fuel(remaining - fuel)
-            .map_err(|_| DbError::reject(Reject::VmTrap))
+        error
+            .downcast::<DbError>()
+            .unwrap_or_else(|_| DbError::reject(Reject::VmTrap))
     }
 
     fn write(store: &mut Store<ExecState>, ptr: i32, bytes: &[u8]) -> Result<(), DbError> {
@@ -407,14 +318,13 @@ impl Executor {
 }
 
 struct ExecState {
-    root: Root,
     read_only: bool,
     memory: Option<Memory>,
     in_alloc: bool,
     response: Option<Vec<u8>>,
-    pending: Option<Pending>,
+    requests: mpsc::UnboundedSender<Operation>,
+    segment: Option<WasmSegment>,
     fatal: Option<DbError>,
-    writes: usize,
     limits: ProfileLimiter,
     profile: Vec<ProfileSpan>,
 }
@@ -426,20 +336,48 @@ struct ProfileSpan {
 }
 
 impl ExecState {
-    fn new(root: Root, read_only: bool) -> Self {
+    fn new(read_only: bool, requests: mpsc::UnboundedSender<Operation>) -> Self {
         Self {
-            root,
             read_only,
             memory: None,
             in_alloc: false,
             response: None,
-            pending: None,
+            requests,
+            segment: None,
             fatal: None,
-            writes: 0,
             limits: Profile::limits(),
             profile: Vec::new(),
         }
     }
+}
+
+struct WasmSegment {
+    timer: Timer,
+    fuel: u64,
+    bytes: usize,
+}
+
+impl WasmSegment {
+    fn new(fuel: u64, bytes: usize) -> Self {
+        Self {
+            timer: Timer::new("db_wasm"),
+            fuel,
+            bytes,
+        }
+    }
+
+    fn finish(self, remaining: u64, next: &str) {
+        self.timer.finish(format!(
+            "input_bytes={} fuel={} next={next}",
+            self.bytes,
+            self.fuel.saturating_sub(remaining),
+        ));
+    }
+}
+
+struct Operation {
+    request: Pending,
+    reply: oneshot::Sender<Result<Option<Vec<u8>>, DbError>>,
 }
 
 enum Pending {
@@ -458,7 +396,7 @@ impl Host {
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
-    ) -> Result<(), wasmi::Error> {
+    ) -> Result<(), wasmtime::Error> {
         if caller.data().in_alloc || !(1..=32).contains(&len) || caller.data().profile.len() >= 16 {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         }
@@ -485,7 +423,7 @@ impl Host {
         Ok(())
     }
 
-    fn profile_exit(mut caller: Caller<'_, ExecState>) -> Result<(), wasmi::Error> {
+    fn profile_exit(mut caller: Caller<'_, ExecState>) -> Result<(), wasmtime::Error> {
         if caller.data().in_alloc {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         }
@@ -504,68 +442,86 @@ impl Host {
         Ok(())
     }
 
-    fn map_get(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<i32, wasmi::Error> {
+    async fn map_get(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<i32, wasmtime::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<Vec<MapKey>>(bytes)
                 .map(Pending::Get)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
+        .await
     }
 
-    fn map_range(
+    async fn map_range(
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
-    ) -> Result<i32, wasmi::Error> {
+    ) -> Result<i32, wasmtime::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<MapRange>(bytes)
                 .map(Pending::Range)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
+        .await
     }
 
-    fn map_insert(
+    async fn map_insert(
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
-    ) -> Result<(), wasmi::Error> {
+    ) -> Result<(), wasmtime::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<(MapKey, serde_bytes::ByteBuf)>(bytes)
                 .map(|(key, value)| Pending::Set(key, value.into_vec()))
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
+        .await
         .map(|_| ())
     }
 
-    fn map_remove(
+    async fn map_remove(
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
-    ) -> Result<(), wasmi::Error> {
+    ) -> Result<(), wasmtime::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<MapKey>(bytes)
                 .map(Pending::Del)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
+        .await
         .map(|_| ())
     }
 
-    fn tx_get(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<i32, wasmi::Error> {
+    async fn tx_get(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<i32, wasmtime::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<Txid>(bytes)
                 .map(Pending::Tx)
                 .map_err(|_| DbError::reject(Reject::Abi))
         })
+        .await
     }
 
-    fn abort(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<(), wasmi::Error> {
+    async fn abort(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<(), wasmtime::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             Ok(Pending::Abort(bytes.to_vec()))
         })
+        .await
         .map(|_| ())
     }
 
-    fn read_only(caller: Caller<'_, ExecState>) -> Result<i32, wasmi::Error> {
+    fn read_only(caller: Caller<'_, ExecState>) -> Result<i32, wasmtime::Error> {
         Ok(i32::from(caller.data().read_only))
     }
 
@@ -573,7 +529,7 @@ impl Host {
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
         capacity: i32,
-    ) -> Result<i32, wasmi::Error> {
+    ) -> Result<i32, wasmtime::Error> {
         let _copy = Timer::new("db_host_copy");
         if caller.data().in_alloc {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
@@ -607,12 +563,12 @@ impl Host {
         i32::try_from(length).map_err(|_| Self::fail(&mut caller, DbError::reject(Reject::Abi)))
     }
 
-    fn request(
+    async fn request(
         caller: &mut Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
         parse: impl FnOnce(&[u8]) -> Result<Pending, DbError>,
-    ) -> Result<i32, wasmi::Error> {
+    ) -> Result<i32, wasmtime::Error> {
         let _request = Timer::new("db_host_request");
         if caller.data().in_alloc {
             return Err(Self::fail(caller, DbError::reject(Reject::Abi)));
@@ -630,8 +586,42 @@ impl Host {
             Ok(pending) => pending,
             Err(error) => return Err(Self::fail(caller, error)),
         };
-        caller.data_mut().pending = Some(pending);
-        Err(wasmi::Error::i32_exit(SUSPEND))
+        drop(_request);
+        let next = match &pending {
+            Pending::Get(_) => "get",
+            Pending::Range(_) => "range",
+            Pending::Set(_, _) => "set",
+            Pending::Del(_) => "del",
+            Pending::Tx(_) => "tx",
+            Pending::Abort(_) => "abort",
+        };
+        let fuel = caller.get_fuel()?;
+        if let Some(segment) = caller.data_mut().segment.take() {
+            segment.finish(fuel, next);
+        }
+        let (reply, response) = oneshot::channel();
+        caller
+            .data()
+            .requests
+            .unbounded_send(Operation {
+                request: pending,
+                reply,
+            })
+            .map_err(|_| Self::fail(caller, DbError::integrity()))?;
+        let bytes = response
+            .await
+            .map_err(|_| Self::fail(caller, DbError::integrity()))?
+            .map_err(|error| Self::fail(caller, error))?;
+        let length = bytes.as_ref().map_or(0, Vec::len);
+        if bytes.is_some() {
+            Self::charge(caller, length as u64).map_err(|error| Self::fail(caller, error))?;
+            caller.data_mut().response = bytes;
+        }
+        let length_i32 = i32::try_from(length)
+            .map_err(|_| Self::fail(caller, DbError::reject(Reject::ResourceLimit)))?;
+        let fuel = caller.get_fuel()?;
+        caller.data_mut().segment = Some(WasmSegment::new(fuel, length));
+        Ok(length_i32)
     }
 
     fn read(caller: &Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<Vec<u8>, DbError> {
@@ -666,8 +656,8 @@ impl Host {
             .map_err(|_| DbError::reject(Reject::VmTrap))
     }
 
-    fn fail(caller: &mut Caller<'_, ExecState>, error: DbError) -> wasmi::Error {
+    fn fail(caller: &mut Caller<'_, ExecState>, error: DbError) -> wasmtime::Error {
         caller.data_mut().fatal = Some(error);
-        wasmi::Error::i32_exit(SUSPEND)
+        wasmtime::Error::msg("guest host call failed")
     }
 }

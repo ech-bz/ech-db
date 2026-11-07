@@ -12,8 +12,8 @@ ech-db-protocol = { path = "../ech-db-protocol" }
 foundationdb.workspace = true
 foundationdb-tuple.workspace = true
 futures.workspace = true
-wasmi.workspace = true
-wasmi_core.workspace = true
+wasmtime.workspace = true
+wasmparser.workspace = true
 bcs.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
@@ -23,3 +23,4 @@ axum.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+

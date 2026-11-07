@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let _network = unsafe { foundationdb::boot() };
     let db = Db::open(&args.cluster_file)?;
-    let server = Arc::new(Server::new(db));
+    let server = Arc::new(Server::new(db)?);
     server.run(args.listen).await?;
     Ok(())
 }

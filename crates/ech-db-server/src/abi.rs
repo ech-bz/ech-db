@@ -1,4 +1,4 @@
-use wasmi::{ExternType, Module, ValType};
+use wasmtime::{ExternType, Module, ValType};
 
 use ech_db_protocol::error::Reject;
 
@@ -8,6 +8,18 @@ pub struct Abi;
 
 impl Abi {
     pub const MODULE: &'static str = "ech";
+
+    pub fn check_bytes(wasm: &[u8]) -> Result<(), DbError> {
+        for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+            if matches!(
+                payload.map_err(|_| DbError::reject(Reject::InvalidWasm))?,
+                wasmparser::Payload::StartSection { .. }
+            ) {
+                return Err(DbError::reject(Reject::InvalidWasm));
+            }
+        }
+        Ok(())
+    }
 
     pub fn check(module: &Module) -> Result<(), DbError> {
         for import in module.imports() {
@@ -27,10 +39,10 @@ impl Abi {
             if func.params().len() != params || func.results().len() != results {
                 return Err(DbError::reject(Reject::Abi));
             }
-            if !func.params().iter().all(|param| *param == ValType::I32) {
+            if !func.params().all(|param| matches!(param, ValType::I32)) {
                 return Err(DbError::reject(Reject::Abi));
             }
-            if results == 1 && func.results()[0] != ValType::I32 {
+            if results == 1 && !matches!(func.results().next(), Some(ValType::I32)) {
                 return Err(DbError::reject(Reject::Abi));
             }
         }
@@ -52,9 +64,12 @@ impl Abi {
         match module.get_export(name) {
             Some(ExternType::Func(func))
                 if func.params().len() == params
-                    && func.params().iter().all(|param| *param == ValType::I32)
+                    && func.params().all(|param| matches!(param, ValType::I32))
                     && func.results().len() == 1
-                    && func.results()[0] == result =>
+                    && func
+                        .results()
+                        .next()
+                        .is_some_and(|ty| ValType::eq(&ty, &result)) =>
             {
                 Ok(())
             }

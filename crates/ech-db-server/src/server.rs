@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::serve::ListenerExt;
 use tracing::Instrument;
-use wasmi::Module;
+use wasmtime::Module;
 
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
@@ -26,13 +26,13 @@ pub(crate) enum PreparedProgram {
 }
 
 impl Server {
-    pub fn new(db: Db) -> Self {
-        let engine = Profile::engine();
-        Self {
+    pub fn new(db: Db) -> Result<Self, wasmtime::Error> {
+        let engine = Profile::engine()?;
+        Ok(Self {
             programs: Programs::new(engine.clone()),
-            executor: Executor::new(engine),
+            executor: Executor::new(engine)?,
             db,
-        }
+        })
     }
 
     pub async fn run(self: Arc<Self>, listen: SocketAddr) -> Result<(), std::io::Error> {
@@ -90,7 +90,7 @@ impl Server {
                     read_only = access.read_only()))
                     .await
             }
-            PreparedProgram::Native => self.programs.native(txid, request),
+            PreparedProgram::Native => self.programs.native(txid, request).await,
         }
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tracing::Instrument;
-use wasmi::{Engine, Module};
+use wasmtime::{Engine, Module};
 
 use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
@@ -17,6 +17,7 @@ use crate::timing::Timer;
 pub struct Programs {
     engine: Engine,
     cache: Mutex<HashMap<Txid, Module>>,
+    compile_lock: tokio::sync::Mutex<()>,
 }
 
 impl Programs {
@@ -26,12 +27,13 @@ impl Programs {
         Self {
             engine,
             cache: Mutex::new(HashMap::new()),
+            compile_lock: tokio::sync::Mutex::new(()),
         }
     }
 
-    pub fn native(&self, txid: &Txid, request: &Request) -> Result<Vec<u8>, DbError> {
+    pub async fn native(&self, txid: &Txid, request: &Request) -> Result<Vec<u8>, DbError> {
         match request.tx.user.call.function.as_str() {
-            Self::UPLOAD_PROGRAM => self.upload(txid, &request.tx.user.call.args),
+            Self::UPLOAD_PROGRAM => self.upload(txid, &request.tx.user.call.args).await,
             function => Err(DbError::reject(Reject::UnknownNative {
                 function: function.to_string(),
             })),
@@ -59,6 +61,11 @@ impl Programs {
             tracing::Span::current().record("cached", true);
             return Ok(module);
         }
+        let _compilation = self.compile_lock.lock().await;
+        if let Some(module) = self.get(txid) {
+            tracing::Span::current().record("cached", true);
+            return Ok(module);
+        }
         tracing::Span::current().record("cached", false);
         let load = Timer::new("db_module_load");
         let wasm = self
@@ -67,23 +74,34 @@ impl Programs {
             .await?;
         drop(load);
         let _compile = Timer::new("db_module_compile");
-        let module = tracing::debug_span!(target: "latency", "wasm.compile", bytes = wasm.len())
-            .in_scope(|| {
-                let module = Module::new(&self.engine, wasm.as_slice())
-                    .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
-                Abi::check(&module)?;
-                Ok::<_, DbError>(module)
-            })?;
+        let module = self.compile(wasm).await?;
         self.cache(*txid, module.clone());
         Ok(module)
     }
 
-    fn upload(&self, txid: &Txid, wasm: &[u8]) -> Result<Vec<u8>, DbError> {
-        let module =
-            Module::new(&self.engine, wasm).map_err(|_| DbError::reject(Reject::InvalidWasm))?;
-        Abi::check(&module)?;
-        self.cache(*txid, module);
+    async fn upload(&self, txid: &Txid, wasm: &[u8]) -> Result<Vec<u8>, DbError> {
+        let _compilation = self.compile_lock.lock().await;
+        if self.get(txid).is_none() {
+            let module = self.compile(wasm.to_vec()).await?;
+            self.cache(*txid, module);
+        }
         Ok(Vec::new())
+    }
+
+    async fn compile(&self, wasm: Vec<u8>) -> Result<Module, DbError> {
+        let engine = self.engine.clone();
+        let span = tracing::debug_span!(target: "latency", "wasm.compile", bytes = wasm.len());
+        tokio::task::spawn_blocking(move || {
+            span.in_scope(|| {
+                Abi::check_bytes(&wasm)?;
+                let module = Module::new(&engine, &wasm)
+                    .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
+                Abi::check(&module)?;
+                Ok(module)
+            })
+        })
+        .await
+        .map_err(|_| DbError::integrity())?
     }
 
     async fn wasm<R: Reader>(

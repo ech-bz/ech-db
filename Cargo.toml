@@ -23,31 +23,11 @@ blake2b_simd = "1.0.5"
 curve25519-dalek = "5.0.0"
 hex = "0.4"
 getrandom = "0.3"
-wasmi = { version = "2.0.0", features = ["deterministic"] }
-wasmi_core = "2.0.0"
+wasmtime = { version = "47.0.4", default-features = false, features = ["std", "runtime", "cranelift", "async", "gc", "gc-null"] }
+wasmparser = { version = "0.252", default-features = false, features = ["std"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
 futures = "0.3"
 axum = { version = "0.8.9", features = ["http2"] }
 clap = { version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[profile.dev.package.wasmi]
-opt-level = 3
-debug-assertions = false
-overflow-checks = false
-
-[profile.dev.package.wasmi_core]
-opt-level = 3
-debug-assertions = false
-overflow-checks = false
-
-[profile.dev.package.wasmi_ir]
-opt-level = 3
-debug-assertions = false
-overflow-checks = false
-
-[profile.dev.package.wasmi_collections]
-opt-level = 3
-debug-assertions = false
-overflow-checks = false
