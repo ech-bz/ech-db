@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use bcs::{from_bytes, to_bytes};
 use futures::{stream, StreamExt, TryStreamExt};
 use tracing::Instrument;
@@ -16,7 +18,7 @@ use crate::big_map::BigMap;
 use crate::error::DbError;
 use crate::fdb::{Mutator, Reader};
 use crate::log::Log;
-use crate::timing::Timer;
+use crate::timing::{self, Timer};
 use crate::wasm::{Profile, ProfileLimiter};
 
 const SUSPEND: i32 = 0x0ECDB;
@@ -67,6 +69,12 @@ impl Executor {
                 linker
                     .func_wrap("ech", "read_only", Host::read_only)
                     .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "profile_enter", Host::profile_enter)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
+                linker
+                    .func_wrap("ech", "profile_exit", Host::profile_exit)
+                    .map_err(|_| DbError::reject(Reject::Abi))?;
                 let mut store = Store::new(&self.engine, ExecState::new(*root, access.read_only()));
                 store.limiter(|state| &mut state.limits);
                 store
@@ -102,6 +110,9 @@ impl Executor {
                 Ok::<_, DbError>((store, entry, ptr, length))
             })?;
         drop(setup);
+        let fuel = store
+            .get_fuel()
+            .map_err(|_| DbError::reject(Reject::VmTrap))?;
         let call = Timer::new("db_wasm");
         let mut step = match tracing::debug_span!(target: "latency", "wasm.call")
             .in_scope(|| entry.call_resumable(&mut store, (ptr, length)))
@@ -109,7 +120,7 @@ impl Executor {
             Ok(step) => step,
             Err(error) => return Err(Self::trap(&mut store, &error)),
         };
-        drop(call);
+        Self::finish_wasm(call, &store, fuel, length as usize, &step)?;
         let value = loop {
             match step {
                 TypedResumableCall::Finished(value) => break value,
@@ -144,24 +155,51 @@ impl Executor {
         let root = store.data().root;
         match pending {
             Pending::Get(keys) => {
+                let started = Instant::now();
                 let read = Timer::new("db_get");
                 let reads: Vec<_> = keys
                     .into_iter()
                     .map(|key| {
                         let key = BigMap::physical(&root, &key);
-                        async move { access.get(&key).await }
+                        async move {
+                            let issued = Instant::now();
+                            let value = access.get(&key).await?;
+                            Ok::<_, DbError>((
+                                value,
+                                issued.elapsed(),
+                                issued.duration_since(started),
+                            ))
+                        }
                     })
                     .collect();
                 let count = reads.len();
-                let values: Vec<Option<Vec<u8>>> = stream::iter(reads)
-                    .buffered(CONCURRENT_READS)
-                    .try_collect()
-                    .instrument(
-                        tracing::debug_span!(target: "latency", "fdb.get_batch", keys = count,
+                let (values, total, longest, last_issued) = async {
+                    let mut reads = stream::iter(reads).buffered(CONCURRENT_READS);
+                    let mut values = Vec::with_capacity(count);
+                    let mut total = Duration::ZERO;
+                    let mut longest = Duration::ZERO;
+                    let mut last_issued = Duration::ZERO;
+                    while let Some((value, elapsed, issued)) = reads.try_next().await? {
+                        total += elapsed;
+                        longest = longest.max(elapsed);
+                        last_issued = last_issued.max(issued);
+                        values.push(value);
+                    }
+                    Ok::<_, DbError>((values, total, longest, last_issued))
+                }
+                .instrument(
+                    tracing::debug_span!(target: "latency", "fdb.get_batch", keys = count,
                         concurrency = CONCURRENT_READS),
-                    )
-                    .await?;
-                drop(read);
+                )
+                .await?;
+                let found = values.iter().flatten().count();
+                let bytes: usize = values.iter().flatten().map(Vec::len).sum();
+                read.finish(format!(
+                    "keys={count} found={found} bytes={bytes} concurrency={CONCURRENT_READS} avg_ms={:.3} max_ms={:.3} last_issue_ms={:.3}",
+                    total.as_secs_f64() * 1000.0 / count.max(1) as f64,
+                    longest.as_secs_f64() * 1000.0,
+                    last_issued.as_secs_f64() * 1000.0,
+                ));
                 let encode = Timer::new("db_host_encode");
                 let bytes =
                     tracing::debug_span!(target: "latency", "host.encode_get", keys = count)
@@ -177,7 +215,7 @@ impl Executor {
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
                 store.data_mut().response = Some(bytes);
-                drop(encode);
+                encode.finish(format!("get keys={count} bytes={length}"));
                 Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Range(range) => {
@@ -192,7 +230,15 @@ impl Executor {
                         .instrument(tracing::debug_span!(target: "latency", "fdb.range"))
                         .await?
                 };
-                drop(read);
+                let row_bytes: usize = rows
+                    .iter()
+                    .map(|(key, value)| key.len() + value.len())
+                    .sum();
+                read.finish(format!(
+                    "limit={} rows={} bytes={row_bytes}",
+                    range.limit,
+                    rows.len()
+                ));
                 let encode = Timer::new("db_host_encode");
                 let bytes =
                     tracing::debug_span!(target: "latency", "host.encode_range", rows = rows.len())
@@ -211,7 +257,7 @@ impl Executor {
                 let length = i32::try_from(bytes.len())
                     .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
                 store.data_mut().response = Some(bytes);
-                drop(encode);
+                encode.finish(format!("range rows={} bytes={length}", rows.len()));
                 Self::resume_wasm(store, typed, &[Val::I32(length)])
             }
             Pending::Set(user_key, value) => {
@@ -254,11 +300,48 @@ impl Executor {
         typed: TypedResumableCallHostTrap<i64>,
         values: &[Val],
     ) -> Result<TypedResumableCall<i64>, DbError> {
-        let _resume = Timer::new("db_wasm");
+        let bytes = store.data().response.as_ref().map_or(0, Vec::len);
+        let fuel = store
+            .get_fuel()
+            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+        let resume = Timer::new("db_wasm");
         match typed.resume(&mut *store, values) {
-            Ok(next) => Ok(next),
+            Ok(next) => {
+                Self::finish_wasm(resume, store, fuel, bytes, &next)?;
+                Ok(next)
+            }
             Err(error) => Err(Self::trap(store, &error)),
         }
+    }
+
+    fn finish_wasm(
+        timer: Timer,
+        store: &Store<ExecState>,
+        fuel: u64,
+        bytes: usize,
+        step: &TypedResumableCall<i64>,
+    ) -> Result<(), DbError> {
+        let remaining = store
+            .get_fuel()
+            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+        let next = match step {
+            TypedResumableCall::Finished(_) => "finished",
+            TypedResumableCall::OutOfFuel(_) => "out_of_fuel",
+            TypedResumableCall::HostTrap(_) => match store.data().pending.as_ref() {
+                Some(Pending::Get(_)) => "get",
+                Some(Pending::Range(_)) => "range",
+                Some(Pending::Set(_, _)) => "set",
+                Some(Pending::Del(_)) => "del",
+                Some(Pending::Tx(_)) => "tx",
+                Some(Pending::Abort(_)) => "abort",
+                None => "trap",
+            },
+        };
+        timer.finish(format!(
+            "input_bytes={bytes} fuel={} next={next}",
+            fuel.saturating_sub(remaining)
+        ));
+        Ok(())
     }
 
     fn trap(store: &mut Store<ExecState>, error: &wasmi::Error) -> DbError {
@@ -333,6 +416,13 @@ struct ExecState {
     fatal: Option<DbError>,
     writes: usize,
     limits: ProfileLimiter,
+    profile: Vec<ProfileSpan>,
+}
+
+struct ProfileSpan {
+    name: String,
+    started: Instant,
+    fuel: u64,
 }
 
 impl ExecState {
@@ -347,6 +437,7 @@ impl ExecState {
             fatal: None,
             writes: 0,
             limits: Profile::limits(),
+            profile: Vec::new(),
         }
     }
 }
@@ -363,6 +454,56 @@ enum Pending {
 struct Host;
 
 impl Host {
+    fn profile_enter(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<(), wasmi::Error> {
+        if caller.data().in_alloc || !(1..=32).contains(&len) || caller.data().profile.len() >= 16 {
+            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+        }
+        if let Err(error) = Self::charge(&mut caller, Profile::HOST_CALL_BASE_FUEL) {
+            return Err(Self::fail(&mut caller, error));
+        }
+        let name = Self::read(&caller, ptr, len)
+            .and_then(|bytes| {
+                if !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+                {
+                    return Err(DbError::reject(Reject::Abi));
+                }
+                String::from_utf8(bytes).map_err(|_| DbError::reject(Reject::Abi))
+            })
+            .map_err(|error| Self::fail(&mut caller, error))?;
+        let fuel = caller.get_fuel()?;
+        caller.data_mut().profile.push(ProfileSpan {
+            name,
+            started: Instant::now(),
+            fuel,
+        });
+        Ok(())
+    }
+
+    fn profile_exit(mut caller: Caller<'_, ExecState>) -> Result<(), wasmi::Error> {
+        if caller.data().in_alloc {
+            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+        }
+        let fuel = caller.get_fuel()?;
+        if let Err(error) = Self::charge(&mut caller, Profile::HOST_CALL_BASE_FUEL) {
+            return Err(Self::fail(&mut caller, error));
+        }
+        let Some(span) = caller.data_mut().profile.pop() else {
+            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+        };
+        timing::guest(
+            span.name,
+            span.started.elapsed(),
+            span.fuel.saturating_sub(fuel),
+        );
+        Ok(())
+    }
+
     fn map_get(mut caller: Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<i32, wasmi::Error> {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<Vec<MapKey>>(bytes)
@@ -433,6 +574,7 @@ impl Host {
         ptr: i32,
         capacity: i32,
     ) -> Result<i32, wasmi::Error> {
+        let _copy = Timer::new("db_host_copy");
         if caller.data().in_alloc {
             return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
         }
@@ -471,6 +613,7 @@ impl Host {
         len: i32,
         parse: impl FnOnce(&[u8]) -> Result<Pending, DbError>,
     ) -> Result<i32, wasmi::Error> {
+        let _request = Timer::new("db_host_request");
         if caller.data().in_alloc {
             return Err(Self::fail(caller, DbError::reject(Reject::Abi)));
         }
