@@ -13,6 +13,8 @@ struct Args {
     listen: SocketAddr,
     #[arg(long)]
     cluster_file: String,
+    #[arg(long)]
+    machine_id: Option<String>,
 }
 
 #[tokio::main]
@@ -23,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let args = Args::parse();
     let _network = unsafe { foundationdb::boot() };
-    let db = Db::open(&args.cluster_file)?;
+    let db = Db::open(&args.cluster_file, args.machine_id.as_deref())?;
+    if let Some(machine_id) = &args.machine_id {
+        tracing::info!(%machine_id, "configured FDB client locality");
+    }
     let server = Arc::new(Server::new(db)?);
     server.run(args.listen).await?;
     Ok(())

@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use foundationdb::options::{MutationType, StreamingMode};
+use foundationdb::options::{DatabaseOption, MutationType, StreamingMode};
 use foundationdb::{Database, FdbError, RangeOption, Transaction, TransactionCommitError};
 use futures::TryStreamExt;
 use serde::Serialize;
@@ -58,10 +58,12 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(cluster_file: &str) -> Result<Self, FdbError> {
-        Ok(Self {
-            database: Database::new(Some(cluster_file))?,
-        })
+    pub fn open(cluster_file: &str, machine_id: Option<&str>) -> Result<Self, FdbError> {
+        let database = Database::new(Some(cluster_file))?;
+        if let Some(machine_id) = machine_id {
+            database.set_option(DatabaseOption::MachineId(machine_id.to_owned()))?;
+        }
+        Ok(Self { database })
     }
 
     pub fn view(&self) -> Result<View, DbError> {
