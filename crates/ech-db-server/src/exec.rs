@@ -144,12 +144,14 @@ impl Executor {
                 let read = Timer::new("db_get");
                 let reads: Vec<_> = keys
                     .into_iter()
-                    .map(|key| {
+                    .enumerate()
+                    .map(|(index, key)| {
                         let key = BigMap::physical(root, &key);
                         async move {
                             let issued = Instant::now();
                             let value = access.get(&key).await?;
                             Ok::<_, DbError>((
+                                index,
                                 value,
                                 issued.elapsed(),
                                 issued.duration_since(started),
@@ -159,16 +161,16 @@ impl Executor {
                     .collect();
                 let count = reads.len();
                 let (values, total, longest, last_issued) = async {
-                    let mut reads = stream::iter(reads).buffered(CONCURRENT_READS);
-                    let mut values = Vec::with_capacity(count);
+                    let mut reads = stream::iter(reads).buffer_unordered(CONCURRENT_READS);
+                    let mut values = vec![None; count];
                     let mut total = Duration::ZERO;
                     let mut longest = Duration::ZERO;
                     let mut last_issued = Duration::ZERO;
-                    while let Some((value, elapsed, issued)) = reads.try_next().await? {
+                    while let Some((index, value, elapsed, issued)) = reads.try_next().await? {
                         total += elapsed;
                         longest = longest.max(elapsed);
                         last_issued = last_issued.max(issued);
-                        values.push(value);
+                        values[index] = value;
                     }
                     Ok::<_, DbError>((values, total, longest, last_issued))
                 }
