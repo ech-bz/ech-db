@@ -6,19 +6,19 @@ use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Chunks, Outcome, Request};
 
-use crate::error::DbError;
+use crate::error::PlatformError;
 use crate::fdb::Edit;
 use crate::log::Log;
 use crate::server::Server;
 
 impl Server {
     #[tracing::instrument(skip_all, fields(%root, function = %request.tx.user.call.function, txid = tracing::field::Empty))]
-    pub async fn append(&self, root: Root, request: Request) -> Result<Outcome, DbError> {
+    pub async fn append(&self, root: Root, request: Request) -> Result<Outcome, PlatformError> {
         let started = Instant::now();
         let txid = request
             .tx
             .txid(&root)
-            .map_err(|_| DbError::reject(Reject::BadRequest))?;
+            .map_err(|_| PlatformError::reject(Reject::BadRequest))?;
         tracing::Span::current().record("txid", tracing::field::display(txid));
         let mut edit = self.db.edit()?;
         let mut attempts = 0u64;
@@ -26,8 +26,8 @@ impl Server {
             attempts += 1;
             let outcome = match self.apply_append(&edit, &root, &txid, &request).await {
                 Ok(outcome) => outcome,
-                Err(DbError::Reject(reject)) => return Err(DbError::Reject(reject)),
-                Err(DbError::Fdb(error)) => {
+                Err(PlatformError::Reject(reject)) => return Err(PlatformError::Reject(reject)),
+                Err(PlatformError::Fdb(error)) => {
                     tracing::info!(attempts, %error, phase = "apply", "retrying append");
                     edit = edit.retry(error).await?;
                     continue;
@@ -72,9 +72,9 @@ impl Server {
         root: &Root,
         txid: &Txid,
         request: &Request,
-    ) -> Result<Outcome, DbError> {
+    ) -> Result<Outcome, PlatformError> {
         let started = Instant::now();
-        request.verify(root).map_err(DbError::Reject)?;
+        request.verify(root).map_err(PlatformError::Reject)?;
         let verify_ms = started.elapsed().as_secs_f64() * 1000.0;
         let lookup_started = Instant::now();
         let (exists, prepared) = futures::join!(
@@ -82,13 +82,13 @@ impl Server {
             self.prepare_program(edit, root, request),
         );
         if exists? {
-            return Err(DbError::reject(Reject::Duplicate));
+            return Err(PlatformError::reject(Reject::Duplicate));
         }
         let prepared = prepared?;
         let lookup_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
-        let body = to_bytes(&request.tx).map_err(|_| DbError::reject(Reject::BadRequest))?;
+        let body = to_bytes(&request.tx).map_err(|_| PlatformError::reject(Reject::BadRequest))?;
         if body.len() > Chunks::MAX_BODY {
-            return Err(DbError::reject(Reject::ResourceLimit));
+            return Err(PlatformError::reject(Reject::ResourceLimit));
         }
         let execution_started = Instant::now();
         let result = self
@@ -96,7 +96,7 @@ impl Server {
             .await?;
         let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
         if result.len() > Chunks::MAX_RESULT {
-            return Err(DbError::reject(Reject::ResourceLimit));
+            return Err(PlatformError::reject(Reject::ResourceLimit));
         }
         let stage_started = Instant::now();
         Log::store(edit, root, txid, &body, &result)?;

@@ -8,7 +8,7 @@ use wasmtime::Module;
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
 
-use crate::error::DbError;
+use crate::error::PlatformError;
 use crate::exec::Executor;
 use crate::fdb::{Db, Reader};
 use crate::programs::Programs;
@@ -52,7 +52,7 @@ impl Server {
         root: &Root,
         txid: &Txid,
         request: &Request,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<Vec<u8>, PlatformError> {
         let prepared = self.prepare_program(access, root, request).await?;
         self.execute_prepared(access, root, txid, request, prepared)
             .await
@@ -63,7 +63,7 @@ impl Server {
         access: &R,
         root: &Root,
         request: &Request,
-    ) -> Result<PreparedProgram, DbError> {
+    ) -> Result<PreparedProgram, PlatformError> {
         match request.tx.user.call.program {
             Program::Txid(id) => {
                 let module = self.programs.module(access, root, &id).await?;
@@ -80,7 +80,7 @@ impl Server {
         txid: &Txid,
         request: &Request,
         prepared: PreparedProgram,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<Vec<u8>, PlatformError> {
         match prepared {
             PreparedProgram::Wasm { id, module } => {
                 self.executor

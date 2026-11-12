@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use ech_db_protocol::error::Reject;
 
-use crate::error::DbError;
+use crate::error::PlatformError;
 
 pub type Row = (Vec<u8>, Vec<u8>);
 
@@ -18,38 +18,41 @@ pub trait Reader {
 
     fn read_only(&self) -> bool;
 
-    fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>, DbError>> + Send;
+    fn get(
+        &self,
+        key: &[u8],
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, PlatformError>> + Send;
 
     fn scan(
         &self,
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> impl Future<Output = Result<Vec<Row>, DbError>> + Send;
+    ) -> impl Future<Output = Result<Vec<Row>, PlatformError>> + Send;
 
     fn scan_reverse(
         &self,
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> impl Future<Output = Result<Vec<Row>, DbError>> + Send;
+    ) -> impl Future<Output = Result<Vec<Row>, PlatformError>> + Send;
 }
 
 pub trait Mutator {
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), DbError>;
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), PlatformError>;
 
-    fn clear(&self, key: &[u8]) -> Result<(), DbError>;
+    fn clear(&self, key: &[u8]) -> Result<(), PlatformError>;
 }
 
 pub struct Denied;
 
 impl Mutator for Denied {
-    fn put(&self, _key: &[u8], _value: &[u8]) -> Result<(), DbError> {
-        Err(DbError::reject(Reject::ReadOnly))
+    fn put(&self, _key: &[u8], _value: &[u8]) -> Result<(), PlatformError> {
+        Err(PlatformError::reject(Reject::ReadOnly))
     }
 
-    fn clear(&self, _key: &[u8]) -> Result<(), DbError> {
-        Err(DbError::reject(Reject::ReadOnly))
+    fn clear(&self, _key: &[u8]) -> Result<(), PlatformError> {
+        Err(PlatformError::reject(Reject::ReadOnly))
     }
 }
 
@@ -66,13 +69,13 @@ impl Db {
         Ok(Self { database })
     }
 
-    pub fn view(&self) -> Result<View, DbError> {
+    pub fn view(&self) -> Result<View, PlatformError> {
         Ok(View {
             trx: self.database.create_trx()?,
         })
     }
 
-    pub fn edit(&self) -> Result<Edit, DbError> {
+    pub fn edit(&self) -> Result<Edit, PlatformError> {
         Ok(Edit { view: self.view()? })
     }
 }
@@ -88,7 +91,7 @@ impl View {
         name = "fdb.read_version",
         skip_all
     )]
-    pub async fn read_version(&self) -> Result<(), DbError> {
+    pub async fn read_version(&self) -> Result<(), PlatformError> {
         self.trx.get_read_version().await?;
         Ok(())
     }
@@ -100,12 +103,12 @@ impl View {
         })
     }
 
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PlatformError> {
         self.trx
             .get(key, false)
             .await
             .map(|value| value.map(|slice| slice.to_vec()))
-            .map_err(DbError::Fdb)
+            .map_err(PlatformError::Fdb)
     }
 
     pub async fn scan(
@@ -113,7 +116,7 @@ impl View {
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> Result<Vec<Row>, DbError> {
+    ) -> Result<Vec<Row>, PlatformError> {
         self.collect(begin, end, limit, false).await
     }
 
@@ -122,7 +125,7 @@ impl View {
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> Result<Vec<Row>, DbError> {
+    ) -> Result<Vec<Row>, PlatformError> {
         self.collect(begin, end, limit, true).await
     }
 
@@ -132,17 +135,18 @@ impl View {
         end: &[u8],
         limit: Option<u64>,
         reverse: bool,
-    ) -> Result<Vec<Row>, DbError> {
+    ) -> Result<Vec<Row>, PlatformError> {
         let mut option = RangeOption::from((begin.to_vec(), end.to_vec()));
         option.mode = StreamingMode::WantAll;
         option.reverse = reverse;
         if let Some(limit) = limit {
-            option.limit =
-                Some(usize::try_from(limit).map_err(|_| DbError::reject(Reject::ResourceLimit))?);
+            option.limit = Some(
+                usize::try_from(limit).map_err(|_| PlatformError::reject(Reject::ResourceLimit))?,
+            );
         }
         let mut stream = self.trx.get_ranges_keyvalues(option, false);
         let mut rows = Vec::new();
-        while let Some(kv) = stream.try_next().await.map_err(DbError::Fdb)? {
+        while let Some(kv) = stream.try_next().await.map_err(PlatformError::Fdb)? {
             rows.push((kv.key().to_vec(), kv.value().to_vec()));
             if let Some(limit) = limit {
                 if rows.len() as u64 >= limit {
@@ -166,7 +170,10 @@ impl Reader for View {
         true
     }
 
-    fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>, DbError>> + Send {
+    fn get(
+        &self,
+        key: &[u8],
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, PlatformError>> + Send {
         View::get(self, key)
     }
 
@@ -175,7 +182,7 @@ impl Reader for View {
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> impl Future<Output = Result<Vec<Row>, DbError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Row>, PlatformError>> + Send {
         View::scan(self, begin, end, limit)
     }
 
@@ -184,7 +191,7 @@ impl Reader for View {
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> impl Future<Output = Result<Vec<Row>, DbError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Row>, PlatformError>> + Send {
         View::scan_reverse(self, begin, end, limit)
     }
 }
@@ -204,8 +211,8 @@ impl Edit {
         self.view.trx.set(key, value);
     }
 
-    pub fn set_bcs<T: Serialize>(&self, key: &[u8], value: &T) -> Result<(), DbError> {
-        let bytes = bcs::to_bytes(value).map_err(|_| DbError::integrity())?;
+    pub fn set_bcs<T: Serialize>(&self, key: &[u8], value: &T) -> Result<(), PlatformError> {
+        let bytes = bcs::to_bytes(value).map_err(|_| PlatformError::integrity())?;
         self.set(key, &bytes);
         Ok(())
     }
@@ -251,12 +258,12 @@ impl CommitError {
 }
 
 impl Mutator for Edit {
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), DbError> {
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), PlatformError> {
         self.set(key, value);
         Ok(())
     }
 
-    fn clear(&self, key: &[u8]) -> Result<(), DbError> {
+    fn clear(&self, key: &[u8]) -> Result<(), PlatformError> {
         self.view.trx.clear(key);
         Ok(())
     }
@@ -273,7 +280,10 @@ impl Reader for Edit {
         false
     }
 
-    fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>, DbError>> + Send {
+    fn get(
+        &self,
+        key: &[u8],
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, PlatformError>> + Send {
         View::get(&self.view, key)
     }
 
@@ -282,7 +292,7 @@ impl Reader for Edit {
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> impl Future<Output = Result<Vec<Row>, DbError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Row>, PlatformError>> + Send {
         View::scan(&self.view, begin, end, limit)
     }
 
@@ -291,7 +301,7 @@ impl Reader for Edit {
         begin: &[u8],
         end: &[u8],
         limit: Option<u64>,
-    ) -> impl Future<Output = Result<Vec<Row>, DbError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Row>, PlatformError>> + Send {
         View::scan_reverse(&self.view, begin, end, limit)
     }
 }

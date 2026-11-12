@@ -9,7 +9,7 @@ use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::{Program, Request};
 
 use crate::abi::Abi;
-use crate::error::DbError;
+use crate::error::PlatformError;
 use crate::fdb::Reader;
 use crate::log::Log;
 use crate::timing::Timer;
@@ -31,10 +31,10 @@ impl Programs {
         }
     }
 
-    pub async fn native(&self, txid: &Txid, request: &Request) -> Result<Vec<u8>, DbError> {
+    pub async fn native(&self, txid: &Txid, request: &Request) -> Result<Vec<u8>, PlatformError> {
         match request.tx.user.call.function.as_str() {
             Self::UPLOAD_PROGRAM => self.upload(txid, &request.tx.user.call.args).await,
-            function => Err(DbError::reject(Reject::UnknownNative {
+            function => Err(PlatformError::reject(Reject::UnknownNative {
                 function: function.to_string(),
             })),
         }
@@ -47,14 +47,14 @@ impl Programs {
         access: &R,
         root: &Root,
         txid: &Txid,
-    ) -> Result<Module, DbError> {
+    ) -> Result<Module, PlatformError> {
         let _module = Timer::new("db_module");
         let check = Timer::new("db_module_check");
         if !Log::exists(access, root, txid)
             .instrument(tracing::debug_span!(target: "latency", "wasm.check_program"))
             .await?
         {
-            return Err(DbError::reject(Reject::ProgramNotFound));
+            return Err(PlatformError::reject(Reject::ProgramNotFound));
         }
         drop(check);
         if let Some(module) = self.get(txid) {
@@ -79,7 +79,7 @@ impl Programs {
         Ok(module)
     }
 
-    async fn upload(&self, txid: &Txid, wasm: &[u8]) -> Result<Vec<u8>, DbError> {
+    async fn upload(&self, txid: &Txid, wasm: &[u8]) -> Result<Vec<u8>, PlatformError> {
         let _compilation = self.compile_lock.lock().await;
         if self.get(txid).is_none() {
             let module = self.compile(wasm.to_vec()).await?;
@@ -88,20 +88,20 @@ impl Programs {
         Ok(Vec::new())
     }
 
-    async fn compile(&self, wasm: Vec<u8>) -> Result<Module, DbError> {
+    async fn compile(&self, wasm: Vec<u8>) -> Result<Module, PlatformError> {
         let engine = self.engine.clone();
         let span = tracing::debug_span!(target: "latency", "wasm.compile", bytes = wasm.len());
         tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
                 Abi::check_bytes(&wasm)?;
                 let module = Module::new(&engine, &wasm)
-                    .map_err(|_| DbError::reject(Reject::InvalidWasm))?;
+                    .map_err(|_| PlatformError::reject(Reject::InvalidWasm))?;
                 Abi::check(&module)?;
                 Ok(module)
             })
         })
         .await
-        .map_err(|_| DbError::integrity())?
+        .map_err(|_| PlatformError::integrity())?
     }
 
     async fn wasm<R: Reader>(
@@ -109,12 +109,12 @@ impl Programs {
         access: &R,
         root: &Root,
         txid: &Txid,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<Vec<u8>, PlatformError> {
         let tx = Log::tx(access, root, txid).await?;
         if !matches!(tx.user.call.program, Program::Native)
             || tx.user.call.function != Self::UPLOAD_PROGRAM
         {
-            return Err(DbError::reject(Reject::NotAProgram));
+            return Err(PlatformError::reject(Reject::NotAProgram));
         }
         Ok(tx.user.call.args)
     }

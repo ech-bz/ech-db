@@ -12,7 +12,7 @@ use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::value::Request;
 
-use crate::error::DbError;
+use crate::error::PlatformError;
 use crate::log::{Dir, History};
 use crate::server::Server;
 use crate::timing::{self, Timer};
@@ -134,11 +134,11 @@ struct HistoryQuery {
     limit: Option<String>,
 }
 
-struct ApiError(DbError);
+struct ApiError(PlatformError);
 
 impl ApiError {
     fn reject(reject: Reject) -> Self {
-        Self(DbError::Reject(reject))
+        Self(PlatformError::Reject(reject))
     }
 
     fn status(reject: &Reject) -> StatusCode {
@@ -155,8 +155,8 @@ impl ApiError {
     }
 }
 
-impl From<DbError> for ApiError {
-    fn from(error: DbError) -> Self {
+impl From<PlatformError> for ApiError {
+    fn from(error: PlatformError) -> Self {
         Self(error)
     }
 }
@@ -164,8 +164,8 @@ impl From<DbError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, reject) = match self.0 {
-            DbError::Reject(reject) => (Self::status(&reject), reject),
-            DbError::Fdb(error) => {
+            PlatformError::Reject(reject) => (Self::status(&reject), reject),
+            PlatformError::Fdb(error) => {
                 tracing::warn!(error = %error, "fdb failure");
                 (StatusCode::SERVICE_UNAVAILABLE, Reject::Unavailable)
             }

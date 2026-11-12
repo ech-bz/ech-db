@@ -2,7 +2,7 @@ use wasmtime::{Config, Engine, OptLevel, ResourceLimiter, Strategy, WasmFeatures
 
 use ech_db_protocol::error::Reject;
 
-use crate::error::DbError;
+use crate::error::PlatformError;
 
 pub struct Profile;
 
@@ -52,7 +52,9 @@ impl ResourceLimiter for ProfileLimiter {
         maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
         if desired > Profile::MEMORY_LIMIT {
-            return Err(wasmtime::Error::new(DbError::reject(Reject::ResourceLimit)));
+            return Err(wasmtime::Error::new(PlatformError::reject(
+                Reject::ResourceLimit,
+            )));
         }
         Ok(maximum.is_none_or(|max| desired <= max))
     }
@@ -64,7 +66,9 @@ impl ResourceLimiter for ProfileLimiter {
         maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
         if desired > Profile::TABLE_LIMIT {
-            return Err(wasmtime::Error::new(DbError::reject(Reject::ResourceLimit)));
+            return Err(wasmtime::Error::new(PlatformError::reject(
+                Reject::ResourceLimit,
+            )));
         }
         Ok(maximum.is_none_or(|max| desired <= max))
     }

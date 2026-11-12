@@ -12,7 +12,7 @@ use ech_db_protocol::map::{MapKey, MapRange};
 use ech_db_protocol::value::{CallOutput, Request};
 
 use crate::big_map::BigMap;
-use crate::error::DbError;
+use crate::error::PlatformError;
 use crate::fdb::{Mutator, Reader};
 use crate::log::Log;
 use crate::timing::{self, Timer};
@@ -59,7 +59,7 @@ impl Executor {
         module: &Module,
         root: &Root,
         request: &Request,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<Vec<u8>, PlatformError> {
         let _execute = Timer::new("db_execute");
         let setup = Timer::new("db_setup");
         let (requests, mut pending) = mpsc::unbounded();
@@ -67,7 +67,7 @@ impl Executor {
         store.limiter(|state| &mut state.limits);
         store
             .set_fuel(Profile::FUEL)
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+            .map_err(|_| PlatformError::reject(Reject::VmTrap))?;
         let instance = self
             .linker
             .instantiate_async(&mut store, module)
@@ -76,17 +76,17 @@ impl Executor {
             .map_err(|error| Self::trap(&mut store, error))?;
         let memory = instance
             .get_memory(&mut store, "memory")
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         store.data_mut().memory = Some(memory);
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, "ech_alloc")
-            .map_err(|_| DbError::reject(Reject::Abi))?;
+            .map_err(|_| PlatformError::reject(Reject::Abi))?;
         let entry = instance
             .get_typed_func::<(i32, i32), i64>(&mut store, "ech_call")
-            .map_err(|_| DbError::reject(Reject::Abi))?;
-        let payload = to_bytes(&(root, request)).map_err(|_| DbError::reject(Reject::Abi))?;
-        let length =
-            i32::try_from(payload.len()).map_err(|_| DbError::reject(Reject::ResourceLimit))?;
+            .map_err(|_| PlatformError::reject(Reject::Abi))?;
+        let payload = to_bytes(&(root, request)).map_err(|_| PlatformError::reject(Reject::Abi))?;
+        let length = i32::try_from(payload.len())
+            .map_err(|_| PlatformError::reject(Reject::ResourceLimit))?;
         store.data_mut().in_alloc = true;
         let allocated = alloc.call_async(&mut store, length).await;
         store.data_mut().in_alloc = false;
@@ -95,7 +95,7 @@ impl Executor {
         drop(setup);
         let fuel = store
             .get_fuel()
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+            .map_err(|_| PlatformError::reject(Reject::VmTrap))?;
         store.data_mut().segment = Some(WasmSegment::new(fuel, payload.len()));
         let mut writes = 0;
         let result = {
@@ -106,11 +106,11 @@ impl Executor {
                     result = &mut call => break result,
                     operation = pending.next() => {
                         let Some(Operation { request, reply }) = operation else {
-                            return Err(DbError::integrity());
+                            return Err(PlatformError::integrity());
                         };
                         let result = Self::perform(access, root, &mut writes, request).await;
                         if reply.send(result).is_err() {
-                            return Err(DbError::integrity());
+                            return Err(PlatformError::integrity());
                         }
                     }
                 }
@@ -118,7 +118,7 @@ impl Executor {
         };
         let remaining = store
             .get_fuel()
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+            .map_err(|_| PlatformError::reject(Reject::VmTrap))?;
         if let Some(segment) = store.data_mut().segment.take() {
             segment.finish(remaining, if result.is_ok() { "finished" } else { "trap" });
         }
@@ -128,7 +128,7 @@ impl Executor {
             .in_scope(|| Self::output(&store, value))?
         {
             CallOutput::Ok(bytes) => Ok(bytes),
-            CallOutput::Err(bytes) => Err(DbError::reject(Reject::Application { bytes })),
+            CallOutput::Err(bytes) => Err(PlatformError::reject(Reject::Application { bytes })),
         }
     }
 
@@ -137,7 +137,7 @@ impl Executor {
         root: &Root,
         writes: &mut usize,
         pending: Pending,
-    ) -> Result<Option<Vec<u8>>, DbError> {
+    ) -> Result<Option<Vec<u8>>, PlatformError> {
         match pending {
             Pending::Get(keys) => {
                 let started = Instant::now();
@@ -150,7 +150,7 @@ impl Executor {
                         async move {
                             let issued = Instant::now();
                             let value = access.get(&key).await?;
-                            Ok::<_, DbError>((
+                            Ok::<_, PlatformError>((
                                 index,
                                 value,
                                 issued.elapsed(),
@@ -172,7 +172,7 @@ impl Executor {
                         last_issued = last_issued.max(issued);
                         values[index] = value;
                     }
-                    Ok::<_, DbError>((values, total, longest, last_issued))
+                    Ok::<_, PlatformError>((values, total, longest, last_issued))
                 }
                 .instrument(
                     tracing::debug_span!(target: "latency", "fdb.get_batch", keys = count,
@@ -197,9 +197,9 @@ impl Executor {
                                 .collect();
                             to_bytes(&values)
                         })
-                        .map_err(|_| DbError::integrity())?;
+                        .map_err(|_| PlatformError::integrity())?;
                 let length = i32::try_from(bytes.len())
-                    .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
+                    .map_err(|_| PlatformError::reject(Reject::ResourceLimit))?;
                 encode.finish(format!("get keys={count} bytes={length}"));
                 Ok(Some(bytes))
             }
@@ -230,16 +230,17 @@ impl Executor {
                         .in_scope(|| {
                             let mut values = Vec::with_capacity(rows.len());
                             for (key, value) in &rows {
-                                let suffix = map.logical(key).ok_or_else(DbError::integrity)?;
+                                let suffix =
+                                    map.logical(key).ok_or_else(PlatformError::integrity)?;
                                 values.push((
                                     serde_bytes::Bytes::new(suffix),
                                     serde_bytes::Bytes::new(value),
                                 ));
                             }
-                            to_bytes(&values).map_err(|_| DbError::integrity())
+                            to_bytes(&values).map_err(|_| PlatformError::integrity())
                         })?;
                 let length = i32::try_from(bytes.len())
-                    .map_err(|_| DbError::reject(Reject::ResourceLimit))?;
+                    .map_err(|_| PlatformError::reject(Reject::ResourceLimit))?;
                 encode.finish(format!("range rows={} bytes={length}", rows.len()));
                 Ok(Some(bytes))
             }
@@ -247,9 +248,9 @@ impl Executor {
                 let key = BigMap::physical(root, &user_key);
                 let total = writes
                     .checked_add(key.len() + value.len())
-                    .ok_or_else(|| DbError::reject(Reject::ResourceLimit))?;
+                    .ok_or_else(|| PlatformError::reject(Reject::ResourceLimit))?;
                 if total > Profile::WRITE_LIMIT {
-                    return Err(DbError::reject(Reject::ResourceLimit));
+                    return Err(PlatformError::reject(Reject::ResourceLimit));
                 }
                 access.writes().put(&key, &value)?;
                 *writes = total;
@@ -266,56 +267,56 @@ impl Executor {
                 drop(read);
                 Ok(Some(bytes))
             }
-            Pending::Abort(bytes) => Err(DbError::reject(Reject::Application { bytes })),
+            Pending::Abort(bytes) => Err(PlatformError::reject(Reject::Application { bytes })),
         }
     }
 
-    fn trap(store: &mut Store<ExecState>, error: wasmtime::Error) -> DbError {
+    fn trap(store: &mut Store<ExecState>, error: wasmtime::Error) -> PlatformError {
         if let Some(fatal) = store.data_mut().fatal.take() {
             return fatal;
         }
         if matches!(error.downcast_ref::<Trap>(), Some(Trap::OutOfFuel)) {
-            return DbError::reject(Reject::OutOfFuel);
+            return PlatformError::reject(Reject::OutOfFuel);
         }
         error
-            .downcast::<DbError>()
-            .unwrap_or_else(|_| DbError::reject(Reject::VmTrap))
+            .downcast::<PlatformError>()
+            .unwrap_or_else(|_| PlatformError::reject(Reject::VmTrap))
     }
 
-    fn write(store: &mut Store<ExecState>, ptr: i32, bytes: &[u8]) -> Result<(), DbError> {
+    fn write(store: &mut Store<ExecState>, ptr: i32, bytes: &[u8]) -> Result<(), PlatformError> {
         let memory = store
             .data()
             .memory
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         let offset = ptr as u32 as usize;
         let end = offset
             .checked_add(bytes.len())
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         if end > memory.data_size(&*store) {
-            return Err(DbError::reject(Reject::Abi));
+            return Err(PlatformError::reject(Reject::Abi));
         }
         memory
             .write(store, offset, bytes)
-            .map_err(|_| DbError::reject(Reject::Abi))
+            .map_err(|_| PlatformError::reject(Reject::Abi))
     }
 
-    fn output(store: &Store<ExecState>, value: i64) -> Result<CallOutput, DbError> {
+    fn output(store: &Store<ExecState>, value: i64) -> Result<CallOutput, PlatformError> {
         let ptr = ((value as u64) >> 32) as u32 as usize;
         let len = ((value as u64) & 0xFFFF_FFFF) as u32 as usize;
         let memory = store
             .data()
             .memory
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         let end = ptr
             .checked_add(len)
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         if end > memory.data_size(store) {
-            return Err(DbError::reject(Reject::Abi));
+            return Err(PlatformError::reject(Reject::Abi));
         }
         if len > Profile::RESPONSE_LIMIT {
-            return Err(DbError::reject(Reject::ResourceLimit));
+            return Err(PlatformError::reject(Reject::ResourceLimit));
         }
-        from_bytes(&memory.data(store)[ptr..end]).map_err(|_| DbError::reject(Reject::Abi))
+        from_bytes(&memory.data(store)[ptr..end]).map_err(|_| PlatformError::reject(Reject::Abi))
     }
 }
 
@@ -326,7 +327,7 @@ struct ExecState {
     response: Option<Vec<u8>>,
     requests: mpsc::UnboundedSender<Operation>,
     segment: Option<WasmSegment>,
-    fatal: Option<DbError>,
+    fatal: Option<PlatformError>,
     limits: ProfileLimiter,
     profile: Vec<ProfileSpan>,
 }
@@ -379,7 +380,7 @@ impl WasmSegment {
 
 struct Operation {
     request: Pending,
-    reply: oneshot::Sender<Result<Option<Vec<u8>>, DbError>>,
+    reply: oneshot::Sender<Result<Option<Vec<u8>>, PlatformError>>,
 }
 
 enum Pending {
@@ -400,7 +401,7 @@ impl Host {
         len: i32,
     ) -> Result<(), wasmtime::Error> {
         if caller.data().in_alloc || !(1..=32).contains(&len) || caller.data().profile.len() >= 16 {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         }
         if let Err(error) = Self::charge(&mut caller, Profile::HOST_CALL_BASE_FUEL) {
             return Err(Self::fail(&mut caller, error));
@@ -411,9 +412,9 @@ impl Host {
                     .iter()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
                 {
-                    return Err(DbError::reject(Reject::Abi));
+                    return Err(PlatformError::reject(Reject::Abi));
                 }
-                String::from_utf8(bytes).map_err(|_| DbError::reject(Reject::Abi))
+                String::from_utf8(bytes).map_err(|_| PlatformError::reject(Reject::Abi))
             })
             .map_err(|error| Self::fail(&mut caller, error))?;
         let fuel = caller.get_fuel()?;
@@ -427,14 +428,14 @@ impl Host {
 
     fn profile_exit(mut caller: Caller<'_, ExecState>) -> Result<(), wasmtime::Error> {
         if caller.data().in_alloc {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         }
         let fuel = caller.get_fuel()?;
         if let Err(error) = Self::charge(&mut caller, Profile::HOST_CALL_BASE_FUEL) {
             return Err(Self::fail(&mut caller, error));
         }
         let Some(span) = caller.data_mut().profile.pop() else {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         };
         timing::guest(
             span.name,
@@ -452,7 +453,7 @@ impl Host {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<Vec<MapKey>>(bytes)
                 .map(Pending::Get)
-                .map_err(|_| DbError::reject(Reject::Abi))
+                .map_err(|_| PlatformError::reject(Reject::Abi))
         })
         .await
     }
@@ -465,7 +466,7 @@ impl Host {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<MapRange>(bytes)
                 .map(Pending::Range)
-                .map_err(|_| DbError::reject(Reject::Abi))
+                .map_err(|_| PlatformError::reject(Reject::Abi))
         })
         .await
     }
@@ -478,7 +479,7 @@ impl Host {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<(MapKey, serde_bytes::ByteBuf)>(bytes)
                 .map(|(key, value)| Pending::Set(key, value.into_vec()))
-                .map_err(|_| DbError::reject(Reject::Abi))
+                .map_err(|_| PlatformError::reject(Reject::Abi))
         })
         .await
         .map(|_| ())
@@ -492,7 +493,7 @@ impl Host {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<MapKey>(bytes)
                 .map(Pending::Del)
-                .map_err(|_| DbError::reject(Reject::Abi))
+                .map_err(|_| PlatformError::reject(Reject::Abi))
         })
         .await
         .map(|_| ())
@@ -506,7 +507,7 @@ impl Host {
         Self::request(&mut caller, ptr, len, |bytes| {
             from_bytes::<Txid>(bytes)
                 .map(Pending::Tx)
-                .map_err(|_| DbError::reject(Reject::Abi))
+                .map_err(|_| PlatformError::reject(Reject::Abi))
         })
         .await
     }
@@ -534,14 +535,14 @@ impl Host {
     ) -> Result<i32, wasmtime::Error> {
         let _copy = Timer::new("db_host_copy");
         if caller.data().in_alloc {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         }
         let capacity = capacity as u32 as usize;
         let Some(length) = caller.data().response.as_ref().map(Vec::len) else {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         };
         if capacity < length {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         }
         let cost = Profile::HOST_CALL_BASE_FUEL + 2 * length as u64;
         if let Err(error) = Self::charge(&mut caller, cost) {
@@ -549,31 +550,32 @@ impl Host {
         }
         let memory = match caller.data().memory {
             Some(memory) => memory,
-            None => return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi))),
+            None => return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi))),
         };
         let offset = ptr as u32 as usize;
         let end = match offset.checked_add(length) {
             Some(end) => end,
-            None => return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi))),
+            None => return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi))),
         };
         if end > memory.data_size(&caller) {
-            return Err(Self::fail(&mut caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(&mut caller, PlatformError::reject(Reject::Abi)));
         }
         let (buffer, state) = memory.data_and_store_mut(&mut caller);
         let response = state.response.as_deref().expect("response exists");
         buffer[offset..end].copy_from_slice(response);
-        i32::try_from(length).map_err(|_| Self::fail(&mut caller, DbError::reject(Reject::Abi)))
+        i32::try_from(length)
+            .map_err(|_| Self::fail(&mut caller, PlatformError::reject(Reject::Abi)))
     }
 
     async fn request(
         caller: &mut Caller<'_, ExecState>,
         ptr: i32,
         len: i32,
-        parse: impl FnOnce(&[u8]) -> Result<Pending, DbError>,
+        parse: impl FnOnce(&[u8]) -> Result<Pending, PlatformError>,
     ) -> Result<i32, wasmtime::Error> {
         let _request = Timer::new("db_host_request");
         if caller.data().in_alloc {
-            return Err(Self::fail(caller, DbError::reject(Reject::Abi)));
+            return Err(Self::fail(caller, PlatformError::reject(Reject::Abi)));
         }
         let input_len = len as u32 as usize;
         let input = match Self::read(caller, ptr, len) {
@@ -609,10 +611,10 @@ impl Host {
                 request: pending,
                 reply,
             })
-            .map_err(|_| Self::fail(caller, DbError::integrity()))?;
+            .map_err(|_| Self::fail(caller, PlatformError::integrity()))?;
         let bytes = response
             .await
-            .map_err(|_| Self::fail(caller, DbError::integrity()))?
+            .map_err(|_| Self::fail(caller, PlatformError::integrity()))?
             .map_err(|error| Self::fail(caller, error))?;
         let length = bytes.as_ref().map_or(0, Vec::len);
         if bytes.is_some() {
@@ -620,45 +622,45 @@ impl Host {
             caller.data_mut().response = bytes;
         }
         let length_i32 = i32::try_from(length)
-            .map_err(|_| Self::fail(caller, DbError::reject(Reject::ResourceLimit)))?;
+            .map_err(|_| Self::fail(caller, PlatformError::reject(Reject::ResourceLimit)))?;
         let fuel = caller.get_fuel()?;
         caller.data_mut().segment = Some(WasmSegment::new(fuel, length));
         Ok(length_i32)
     }
 
-    fn read(caller: &Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<Vec<u8>, DbError> {
+    fn read(caller: &Caller<'_, ExecState>, ptr: i32, len: i32) -> Result<Vec<u8>, PlatformError> {
         let memory = caller
             .data()
             .memory
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         let offset = ptr as u32 as usize;
         let length = len as u32 as usize;
         let end = offset
             .checked_add(length)
-            .ok_or_else(|| DbError::reject(Reject::Abi))?;
+            .ok_or_else(|| PlatformError::reject(Reject::Abi))?;
         if end > memory.data_size(caller) {
-            return Err(DbError::reject(Reject::Abi));
+            return Err(PlatformError::reject(Reject::Abi));
         }
         let mut buffer = vec![0u8; length];
         memory
             .read(caller, offset, &mut buffer)
-            .map_err(|_| DbError::reject(Reject::Abi))?;
+            .map_err(|_| PlatformError::reject(Reject::Abi))?;
         Ok(buffer)
     }
 
-    fn charge(caller: &mut Caller<'_, ExecState>, fuel: u64) -> Result<(), DbError> {
+    fn charge(caller: &mut Caller<'_, ExecState>, fuel: u64) -> Result<(), PlatformError> {
         let remaining = caller
             .get_fuel()
-            .map_err(|_| DbError::reject(Reject::VmTrap))?;
+            .map_err(|_| PlatformError::reject(Reject::VmTrap))?;
         if remaining < fuel {
-            return Err(DbError::reject(Reject::OutOfFuel));
+            return Err(PlatformError::reject(Reject::OutOfFuel));
         }
         caller
             .set_fuel(remaining - fuel)
-            .map_err(|_| DbError::reject(Reject::VmTrap))
+            .map_err(|_| PlatformError::reject(Reject::VmTrap))
     }
 
-    fn fail(caller: &mut Caller<'_, ExecState>, error: DbError) -> wasmtime::Error {
+    fn fail(caller: &mut Caller<'_, ExecState>, error: PlatformError) -> wasmtime::Error {
         caller.data_mut().fatal = Some(error);
         wasmtime::Error::msg("guest host call failed")
     }

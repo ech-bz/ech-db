@@ -5,7 +5,7 @@ use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::keys::{Keys, Prefix};
 use ech_db_protocol::value::{Chunks, Record, Tx};
 
-use crate::error::DbError;
+use crate::error::PlatformError;
 use crate::fdb::{Edit, Reader};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,21 +34,29 @@ pub struct History {
 pub struct Log;
 
 impl Log {
-    pub async fn exists<R: Reader>(access: &R, root: &Root, txid: &Txid) -> Result<bool, DbError> {
+    pub async fn exists<R: Reader>(
+        access: &R,
+        root: &Root,
+        txid: &Txid,
+    ) -> Result<bool, PlatformError> {
         Ok(access.get(&Keys::order_txid(root, txid)).await?.is_some())
     }
 
-    pub async fn tx<R: Reader>(access: &R, root: &Root, txid: &Txid) -> Result<Tx, DbError> {
+    pub async fn tx<R: Reader>(access: &R, root: &Root, txid: &Txid) -> Result<Tx, PlatformError> {
         let body = Self::body(access, root, txid).await?;
-        let tx: Tx = from_bytes(&body).map_err(|_| DbError::integrity())?;
-        let computed = tx.txid(root).map_err(|_| DbError::integrity())?;
+        let tx: Tx = from_bytes(&body).map_err(|_| PlatformError::integrity())?;
+        let computed = tx.txid(root).map_err(|_| PlatformError::integrity())?;
         if computed != *txid {
-            return Err(DbError::integrity());
+            return Err(PlatformError::integrity());
         }
         Ok(tx)
     }
 
-    pub async fn body<R: Reader>(access: &R, root: &Root, txid: &Txid) -> Result<Vec<u8>, DbError> {
+    pub async fn body<R: Reader>(
+        access: &R,
+        root: &Root,
+        txid: &Txid,
+    ) -> Result<Vec<u8>, PlatformError> {
         Self::part(access, root, txid, Part::Body).await
     }
 
@@ -56,7 +64,7 @@ impl Log {
         access: &R,
         root: &Root,
         txid: &Txid,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<Vec<u8>, PlatformError> {
         Self::part(access, root, txid, Part::Response).await
     }
 
@@ -64,7 +72,7 @@ impl Log {
         access: &R,
         root: &Root,
         txid: &Txid,
-    ) -> Result<Record, DbError> {
+    ) -> Result<Record, PlatformError> {
         let (tx, result) = futures::try_join!(
             Self::tx(access, root, txid),
             Self::response(access, root, txid),
@@ -76,9 +84,9 @@ impl Log {
         access: &R,
         root: &Root,
         history: &History,
-    ) -> Result<Vec<Record>, DbError> {
+    ) -> Result<Vec<Record>, PlatformError> {
         let prefix = Keys::order_versionstamp_prefix(root);
-        let end = Prefix::successor(&prefix).ok_or_else(DbError::integrity)?;
+        let end = Prefix::successor(&prefix).ok_or_else(PlatformError::integrity)?;
         let rows = match (history.dir, history.from) {
             (Dir::Forward, Some(txid)) => {
                 let begin =
@@ -102,7 +110,7 @@ impl Log {
         };
         let mut txids = Vec::with_capacity(rows.len());
         for (_, value) in rows {
-            txids.push(Txid::from_slice(&value).ok_or_else(DbError::integrity)?);
+            txids.push(Txid::from_slice(&value).ok_or_else(PlatformError::integrity)?);
         }
         let records = futures::future::try_join_all(
             txids.iter().map(|txid| Self::record(access, root, txid)),
@@ -117,7 +125,7 @@ impl Log {
         txid: &Txid,
         body: &[u8],
         result: &[u8],
-    ) -> Result<(), DbError> {
+    ) -> Result<(), PlatformError> {
         Self::store_part(edit, Part::Body, root, txid, body)?;
         Self::store_part(edit, Part::Response, root, txid, result)?;
         edit.set_versionstamped_key(&Keys::order_versionstamp_next(root), txid.as_bytes());
@@ -131,7 +139,7 @@ impl Log {
         root: &Root,
         txid: &Txid,
         bytes: &[u8],
-    ) -> Result<(), DbError> {
+    ) -> Result<(), PlatformError> {
         let chunks = Chunks::split(bytes);
         for (seq, chunk) in chunks.iter().enumerate() {
             edit.set(&part.chunk_key(root, txid, seq as u64), chunk);
@@ -144,45 +152,48 @@ impl Log {
         root: &Root,
         txid: &Txid,
         part: Part,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<Vec<u8>, PlatformError> {
         let count = Self::count(access, &part.len_key(root, txid)).await?;
         if count > Chunks::limit_for(part.limit()) {
-            return Err(DbError::integrity());
+            return Err(PlatformError::integrity());
         }
         if count == 0 {
             return Ok(Vec::new());
         }
         let prefix = part.prefix(root, txid);
-        let end = Prefix::successor(&prefix).ok_or_else(DbError::integrity)?;
+        let end = Prefix::successor(&prefix).ok_or_else(PlatformError::integrity)?;
         let rows = access.scan(&prefix, &end, Some(count)).await?;
         if rows.len() as u64 != count {
-            return Err(DbError::integrity());
+            return Err(PlatformError::integrity());
         }
         let mut bytes = Vec::with_capacity(count as usize * Chunks::SIZE);
         for (_, value) in rows {
             bytes.extend_from_slice(&value);
         }
         if bytes.len() > part.limit() {
-            return Err(DbError::reject(Reject::ResourceLimit));
+            return Err(PlatformError::reject(Reject::ResourceLimit));
         }
         Ok(bytes)
     }
 
-    async fn count<R: Reader>(access: &R, key: &[u8]) -> Result<u64, DbError> {
-        let bytes = access.get(key).await?.ok_or_else(DbError::integrity)?;
-        from_bytes(&bytes).map_err(|_| DbError::integrity())
+    async fn count<R: Reader>(access: &R, key: &[u8]) -> Result<u64, PlatformError> {
+        let bytes = access
+            .get(key)
+            .await?
+            .ok_or_else(PlatformError::integrity)?;
+        from_bytes(&bytes).map_err(|_| PlatformError::integrity())
     }
 
     async fn versionstamp<R: Reader>(
         access: &R,
         root: &Root,
         txid: &Txid,
-    ) -> Result<[u8; 10], DbError> {
+    ) -> Result<[u8; 10], PlatformError> {
         let bytes = access
             .get(&Keys::order_txid(root, txid))
             .await?
-            .ok_or_else(|| DbError::reject(Reject::NotFound))?;
-        bytes.try_into().map_err(|_| DbError::integrity())
+            .ok_or_else(|| PlatformError::reject(Reject::NotFound))?;
+        bytes.try_into().map_err(|_| PlatformError::integrity())
     }
 }
 
