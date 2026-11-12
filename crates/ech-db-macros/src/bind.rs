@@ -1,21 +1,9 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse_quote, Data, DeriveInput, Fields, LitStr, Path};
+use syn::{parse_quote, Data, DeriveInput, Fields, Path};
 
 pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
-    let mut binding_crate: Path = parse_quote!(::ech_db_guest);
-    for attr in &input.attrs {
-        if attr.path().is_ident("bind") {
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("crate") {
-                    binding_crate = meta.value()?.parse::<LitStr>()?.parse()?;
-                    Ok(())
-                } else {
-                    Err(meta.error("unsupported Bind attribute"))
-                }
-            })?;
-        }
-    }
+    let binding_crate: Path = parse_quote!(::ech_db_guest);
     let name = input.ident;
     let mut generics = input.generics;
     let Data::Struct(data) = input.data else {
@@ -42,6 +30,13 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     });
 
+    let cleanup = fields.named.iter().map(|field| {
+        let ident = field.ident.as_ref().expect("named field");
+        quote! {
+            #binding_crate::Bind::cleanup(&self.#ident)?;
+        }
+    });
+
     Ok(quote! {
         impl #impl_generics #binding_crate::Bind for #name #ty_generics #where_clause {
             fn bind<__EchBindName: #binding_crate::serde::Serialize + ?Sized>(
@@ -49,6 +44,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 name: &__EchBindName,
             ) {
                 #(#body)*
+            }
+
+            fn cleanup(&self) -> ::std::result::Result<(), #binding_crate::GuestError> {
+                #(#cleanup)*
+                Ok(())
             }
         }
     })

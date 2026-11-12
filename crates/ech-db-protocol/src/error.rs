@@ -1,18 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
-pub enum CodecError {
+pub enum ProtocolError {
     #[error("bcs: {0}")]
     Bcs(#[from] bcs::Error),
+    #[error("invalid hex encoding")]
+    Hex,
+    #[error("invalid root encoding")]
+    Root,
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid hex encoding")]
-pub struct HexError;
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid root encoding")]
-pub struct RootError;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum Reject {

@@ -1,11 +1,11 @@
-use ech_db_protocol::error::CodecError;
+use ech_db_protocol::error::ProtocolError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("random source unavailable")]
     Random,
-    #[error("codec: {0}")]
-    Codec(#[from] CodecError),
+    #[error("protocol: {0}")]
+    Protocol(#[from] ProtocolError),
     #[error("root is not a point")]
     Root,
     #[error("esid is not a point")]

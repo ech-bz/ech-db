@@ -584,9 +584,11 @@ name = "ech-db-guest"
 version = "0.1.0"
 dependencies = [
  "bcs",
+ "ech-db-macros",
  "ech-db-protocol",
  "serde",
  "serde_bytes",
+ "thiserror",
 ]
 
 [[package]]
@@ -605,7 +607,6 @@ dependencies = [
  "bcs",
  "blake2b_simd",
  "curve25519-dalek",
- "ech-db-macros",
  "foundationdb-tuple",
  "hex",
  "serde",

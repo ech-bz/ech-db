@@ -4,14 +4,14 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::Curve;
-use crate::error::{HexError, RootError};
+use crate::error::ProtocolError;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Root([u8; 32]);
 
 impl Root {
-    pub fn new(bytes: [u8; 32]) -> Result<Self, RootError> {
-        Curve::point(&bytes).ok_or(RootError)?;
+    pub fn new(bytes: [u8; 32]) -> Result<Self, ProtocolError> {
+        Curve::point(&bytes).ok_or(ProtocolError::Root)?;
         Ok(Self(bytes))
     }
 
@@ -25,11 +25,11 @@ impl Root {
 }
 
 impl FromStr for Root {
-    type Err = RootError;
+    type Err = ProtocolError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let bytes = hex::decode(text).map_err(|_| RootError)?;
-        let array: [u8; 32] = bytes.try_into().map_err(|_| RootError)?;
+        let bytes = hex::decode(text).map_err(|_| ProtocolError::Root)?;
+        let array: [u8; 32] = bytes.try_into().map_err(|_| ProtocolError::Root)?;
         Self::new(array)
     }
 }
@@ -63,11 +63,11 @@ impl Txid {
 }
 
 impl FromStr for Txid {
-    type Err = HexError;
+    type Err = ProtocolError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let bytes = hex::decode(text).map_err(|_| HexError)?;
-        let array: [u8; 32] = bytes.try_into().map_err(|_| HexError)?;
+        let bytes = hex::decode(text).map_err(|_| ProtocolError::Hex)?;
+        let array: [u8; 32] = bytes.try_into().map_err(|_| ProtocolError::Hex)?;
         Ok(Self(array))
     }
 }

@@ -1,4 +1,4 @@
-use crate::{BigMap, Bind, Result};
+use crate::{BigMap, Bind, GuestError, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Bind, Serialize, Deserialize)]
@@ -50,9 +50,7 @@ impl<T> std::fmt::Debug for BigLog<T> {
 impl<T: Serialize> BigLog<T> {
     pub fn push(&mut self, value: &T) -> Result<u64> {
         let index = self.length;
-        let next = index
-            .checked_add(1)
-            .ok_or_else(|| b"BigLog length overflow".to_vec())?;
+        let next = index.checked_add(1).ok_or(GuestError::Limit)?;
         self.entries.insert(&index, value)?;
         self.length = next;
         Ok(index)

@@ -1,3 +1,5 @@
+use ech_db_protocol::value::Esid;
+
 pub trait Key: Sized {
     fn encode(&self) -> Vec<u8>;
 
@@ -34,7 +36,7 @@ impl Key for String {
     }
 }
 
-impl Key for ech_db_protocol::value::Esid {
+impl Key for Esid {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(96);
         bytes.extend_from_slice(&self.tweak);
@@ -45,7 +47,7 @@ impl Key for ech_db_protocol::value::Esid {
 
     fn decode(bytes: &[u8]) -> Option<Self> {
         let bytes: [u8; 96] = bytes.try_into().ok()?;
-        Some(ech_db_protocol::value::Esid {
+        Some(Esid {
             tweak: bytes[0..32].try_into().ok()?,
             c1: bytes[32..64].try_into().ok()?,
             c2: bytes[64..96].try_into().ok()?,

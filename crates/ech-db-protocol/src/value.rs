@@ -3,15 +3,12 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::Curve;
-use crate::error::{CodecError, Reject};
+use crate::error::{ProtocolError, Reject};
 use crate::hash::Blake2b256;
 use crate::id::{Root, Txid};
 use crate::proof::{Equation, Proof, Statement, Term};
 
-#[derive(
-    crate::Bind, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug,
-)]
-#[bind(crate = "crate")]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Esid {
     pub tweak: [u8; 32],
     pub c1: [u8; 32],
@@ -47,8 +44,8 @@ pub struct UserPart {
 }
 
 impl UserPart {
-    pub fn context(root: &Root, ctx: &[u8], call: &Call) -> Result<Vec<u8>, CodecError> {
-        bcs::to_bytes(&(root, ctx, call)).map_err(CodecError::from)
+    pub fn context(root: &Root, ctx: &[u8], call: &Call) -> Result<Vec<u8>, ProtocolError> {
+        bcs::to_bytes(&(root, ctx, call)).map_err(ProtocolError::from)
     }
 }
 
@@ -60,8 +57,8 @@ pub struct ServerPart {
 }
 
 impl ServerPart {
-    pub fn context(root: &Root, user: &UserPart, ctx: &[u8]) -> Result<Vec<u8>, CodecError> {
-        bcs::to_bytes(&(root, user, ctx)).map_err(CodecError::from)
+    pub fn context(root: &Root, user: &UserPart, ctx: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        bcs::to_bytes(&(root, user, ctx)).map_err(ProtocolError::from)
     }
 }
 
@@ -72,8 +69,8 @@ pub struct Tx {
 }
 
 impl Tx {
-    pub fn txid(&self, root: &Root) -> Result<Txid, CodecError> {
-        let bytes = bcs::to_bytes(&(root, &self.user)).map_err(CodecError::from)?;
+    pub fn txid(&self, root: &Root) -> Result<Txid, ProtocolError> {
+        let bytes = bcs::to_bytes(&(root, &self.user)).map_err(ProtocolError::from)?;
         Ok(Txid::new(Blake2b256::hash(&[bytes.as_slice()])))
     }
 

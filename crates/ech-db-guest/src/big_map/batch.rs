@@ -1,5 +1,5 @@
 use super::{decode, BigMap};
-use crate::{Host, Key, Result};
+use crate::{GuestError, Host, Key, Result};
 use ech_db_protocol::map::MapKey;
 use serde::de::DeserializeOwned;
 
@@ -28,7 +28,7 @@ pub(super) fn get_batch<B: BatchRead>(batch: B) -> Result<B::Output> {
         Host::map_get(&keys)
     };
     if values.len() != keys.len() {
-        return Err(b"invalid BigMap batch response length".to_vec());
+        return Err(GuestError::Batch);
     }
     batch.decode(&mut values.into_iter())
 }
@@ -46,11 +46,7 @@ impl<K: Key, V: DeserializeOwned> BatchRead for (&BigMap<K, V>, &K) {
     }
 
     fn decode(&self, values: &mut std::vec::IntoIter<Option<Vec<u8>>>) -> Result<Self::Output> {
-        decode(
-            values
-                .next()
-                .ok_or_else(|| b"missing BigMap batch result".to_vec())?,
-        )
+        decode(values.next().ok_or(GuestError::Batch)?)
     }
 }
 

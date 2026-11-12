@@ -4,7 +4,7 @@ use blake2b_simd::Params;
 use curve25519_dalek::scalar::Scalar;
 
 use ech_db_protocol::crypto::Curve;
-use ech_db_protocol::error::CodecError;
+use ech_db_protocol::error::ProtocolError;
 use ech_db_protocol::id::Root;
 use ech_db_protocol::proof::{Proof, Statement};
 use ech_db_protocol::value::{Author, Call, Esid, UserPart};
@@ -63,7 +63,7 @@ impl Client {
 
     fn scalars(&self, root: &Root, tweak: [u8; 32]) -> Result<(Scalar, Scalar), Error> {
         let x = Self::derive(&self.0, b"identity", root.as_bytes());
-        let info = bcs::to_bytes(&(root, tweak)).map_err(CodecError::from)?;
+        let info = bcs::to_bytes(&(root, tweak)).map_err(ProtocolError::from)?;
         let r = Self::derive(&self.0, b"encryption", &info);
         Ok((x, r))
     }

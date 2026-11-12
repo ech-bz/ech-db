@@ -1,9 +1,11 @@
-use crate::{host::Host, Bind, Key, Result};
+use crate::{host::Host, Bind, GuestError, Key, Result};
 use ech_db_protocol::map::{MapKey, MapRange};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fmt, marker::PhantomData};
 
 mod batch;
+
+const CLEANUP_BATCH: usize = 256;
 
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -27,15 +29,29 @@ impl<K, V> BigMap<K, V> {
     }
 
     fn name(&self) -> Result<&[u8]> {
-        self.name
-            .as_deref()
-            .ok_or_else(|| b"unbound BigMap".to_vec())
+        self.name.as_deref().ok_or(GuestError::Unbound)
     }
 }
 
-impl<K, V> Bind for BigMap<K, V> {
+impl<K: Key, V: DeserializeOwned> Bind for BigMap<K, V> {
     fn bind<N: Serialize + ?Sized>(&mut self, name: &N) {
         self.name = Some(bcs::to_bytes(name).expect("collection name"));
+    }
+
+    fn cleanup(&self) -> Result<()> {
+        let mut after: Option<K> = None;
+        loop {
+            let batch = self.entries(after.as_ref(), CLEANUP_BATCH)?;
+            let mut last = None;
+            for (key, _) in batch {
+                self.remove(&key)?;
+                last = Some(key);
+            }
+            match last {
+                Some(key) => after = Some(key),
+                None => return Ok(()),
+            }
+        }
     }
 }
 
@@ -80,7 +96,7 @@ impl<K: Key, V> BigMap<K, V> {
 
 impl<K: Key, V: Serialize> BigMap<K, V> {
     pub fn insert(&self, key: &K, value: &V) -> Result<()> {
-        let bytes = bcs::to_bytes(value).map_err(|error| error.to_string().into_bytes())?;
+        let bytes = bcs::to_bytes(value)?;
         Host::map_insert(&self.key(key)?, &bytes);
         Ok(())
     }
@@ -107,16 +123,13 @@ impl<K: Key, V: DeserializeOwned> BigMap<K, V> {
             map: self.name()?.to_vec(),
             after: from.map(Key::encode),
             before: to.map(Key::encode),
-            limit: limit
-                .try_into()
-                .map_err(|_| b"BigMap range limit overflow".to_vec())?,
+            limit: limit.try_into().map_err(|_| GuestError::Limit)?,
         };
         Host::map_range(&range)
             .into_iter()
             .map(|(key, value)| {
-                let key = K::decode(&key).ok_or_else(|| b"invalid BigMap key".to_vec())?;
-                let value =
-                    bcs::from_bytes(&value).map_err(|error| error.to_string().into_bytes())?;
+                let key = K::decode(&key).ok_or(GuestError::InvalidKey)?;
+                let value = bcs::from_bytes(&value)?;
                 Ok((key, value))
             })
             .collect()
@@ -125,6 +138,6 @@ impl<K: Key, V: DeserializeOwned> BigMap<K, V> {
 
 fn decode<V: DeserializeOwned>(bytes: Option<Vec<u8>>) -> Result<Option<V>> {
     bytes
-        .map(|bytes| bcs::from_bytes(&bytes).map_err(|error| error.to_string().into_bytes()))
+        .map(|bytes| bcs::from_bytes(&bytes).map_err(Into::into))
         .transpose()
 }
