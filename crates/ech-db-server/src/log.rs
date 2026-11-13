@@ -87,7 +87,7 @@ impl Log {
         history: &History,
     ) -> Result<Vec<Record>, PlatformError> {
         let prefix = match &history.esid {
-            Some(esid) => Keys::author_prefix(root, esid),
+            Some(esid) => Keys::author_entries_prefix(root, esid),
             None => Keys::order_versionstamp_prefix(root),
         };
         let end = Prefix::successor(&prefix).ok_or_else(PlatformError::integrity)?;
@@ -140,6 +140,7 @@ impl Log {
         edit.set_versionstamped_key(&Keys::order_versionstamp_next(root), txid.as_bytes());
         edit.set_versionstamped_value(&Keys::order_txid(root, txid));
         if let Author::User { esid, .. } = author {
+            edit.add(&Keys::author_length(root, esid), 1);
             edit.set_versionstamped_key(
                 &Keys::author_versionstamp_next(root, esid),
                 txid.as_bytes(),

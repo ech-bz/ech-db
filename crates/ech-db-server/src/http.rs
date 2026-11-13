@@ -132,7 +132,16 @@ impl Server {
             )
             .await
         {
-            Ok(records) => Self::encoded(&records),
+            Ok((records, length)) => {
+                let mut response = Self::encoded(&records);
+                if let Some(length) = length {
+                    response.headers_mut().insert(
+                        "x-history-length",
+                        length.to_string().parse().expect("u64 header"),
+                    );
+                }
+                response
+            }
             Err(error) => ApiError::from(error).into_response(),
         }
     }

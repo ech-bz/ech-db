@@ -223,6 +223,12 @@ impl Edit {
             .atomic_op(key, value, MutationType::SetVersionstampedKey);
     }
 
+    pub fn add(&self, key: &[u8], value: u64) {
+        self.view
+            .trx
+            .atomic_op(key, &value.to_le_bytes(), MutationType::Add);
+    }
+
     pub fn set_versionstamped_value(&self, key: &[u8]) {
         self.view
             .trx

@@ -117,7 +117,7 @@ impl Keys {
         ))
     }
 
-    pub fn author_prefix(root: &Root, esid: &Esid) -> Vec<u8> {
+    pub fn author_length(root: &Root, esid: &Esid) -> Vec<u8> {
         pack(&(
             Bytes::from(root.as_bytes()),
             "author",
@@ -126,6 +126,20 @@ impl Keys {
                 Bytes::from(esid.c1.as_slice()),
                 Bytes::from(esid.c2.as_slice()),
             ),
+            "length",
+        ))
+    }
+
+    pub fn author_entries_prefix(root: &Root, esid: &Esid) -> Vec<u8> {
+        pack(&(
+            Bytes::from(root.as_bytes()),
+            "author",
+            (
+                Bytes::from(esid.tweak.as_slice()),
+                Bytes::from(esid.c1.as_slice()),
+                Bytes::from(esid.c2.as_slice()),
+            ),
+            "entries",
         ))
     }
 
@@ -138,6 +152,7 @@ impl Keys {
                 Bytes::from(esid.c1.as_slice()),
                 Bytes::from(esid.c2.as_slice()),
             ),
+            "entries",
             Versionstamp::incomplete(0),
         ))
     }
@@ -151,6 +166,7 @@ impl Keys {
                 Bytes::from(esid.c1.as_slice()),
                 Bytes::from(esid.c2.as_slice()),
             ),
+            "entries",
             Versionstamp::complete(versionstamp, 0),
         ))
     }
