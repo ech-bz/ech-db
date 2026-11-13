@@ -39,6 +39,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         impl #impl_generics #binding_crate::Bind for #name #ty_generics #where_clause {
+            #[allow(unused_variables)]
             fn bind<__EchBindName: #binding_crate::serde::Serialize + ?Sized>(
                 &mut self,
                 name: &__EchBindName,
