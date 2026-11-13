@@ -49,7 +49,7 @@ impl Client {
         let (x, r) = self.scalars(root, tweak)?;
         let esid = self.esid(root, tweak)?;
         let statement = Statement::user(root, &esid);
-        let context = UserPart::context(root, &ctx, &call)?;
+        let context = UserPart::context(root, &tweak, &ctx, &call)?;
         let alpha = Self::random()?;
         let beta = Self::random()?;
         let proof = Proof::prove(b"user", &statement, &context, &[x, r], &[alpha, beta])
