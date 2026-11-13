@@ -37,6 +37,9 @@ impl Executor {
         linker.func_wrap_async("ech", "tx_get", |caller, (ptr, len)| {
             Box::new(Host::tx_get(caller, ptr, len))
         })?;
+        linker.func_wrap_async("ech", "tx_get_many", |caller, (ptr, len)| {
+            Box::new(Host::tx_get_many(caller, ptr, len))
+        })?;
         linker.func_wrap_async("ech", "map_insert", |caller, (ptr, len)| {
             Box::new(Host::map_insert(caller, ptr, len))
         })?;
@@ -267,6 +270,20 @@ impl Executor {
                 drop(read);
                 Ok(Some(bytes))
             }
+            Pending::TxMany(txids) => {
+                let read = Timer::new("db_txs");
+                let mut values = Vec::with_capacity(txids.len());
+                for txid in &txids {
+                    values.push(Log::body(access, root, txid).await?);
+                }
+                drop(read);
+                let encode = Timer::new("db_host_encode");
+                let bytes = to_bytes(&values).map_err(|_| PlatformError::integrity())?;
+                let length = i32::try_from(bytes.len())
+                    .map_err(|_| PlatformError::reject(Reject::ResourceLimit))?;
+                encode.finish(format!("txs count={} bytes={length}", values.len()));
+                Ok(Some(bytes))
+            }
             Pending::Abort(bytes) => Err(PlatformError::reject(Reject::Application { bytes })),
         }
     }
@@ -389,6 +406,7 @@ enum Pending {
     Set(MapKey, Vec<u8>),
     Del(MapKey),
     Tx(Txid),
+    TxMany(Vec<Txid>),
     Abort(Vec<u8>),
 }
 
@@ -512,6 +530,19 @@ impl Host {
         .await
     }
 
+    async fn tx_get_many(
+        mut caller: Caller<'_, ExecState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<i32, wasmtime::Error> {
+        Self::request(&mut caller, ptr, len, |bytes| {
+            from_bytes::<Vec<Txid>>(bytes)
+                .map(Pending::TxMany)
+                .map_err(|_| PlatformError::reject(Reject::Abi))
+        })
+        .await
+    }
+
     async fn abort(
         mut caller: Caller<'_, ExecState>,
         ptr: i32,
@@ -597,6 +628,7 @@ impl Host {
             Pending::Set(_, _) => "set",
             Pending::Del(_) => "del",
             Pending::Tx(_) => "tx",
+            Pending::TxMany(_) => "txs",
             Pending::Abort(_) => "abort",
         };
         let fuel = caller.get_fuel()?;

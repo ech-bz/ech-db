@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use ech_db_protocol::id::Txid;
 use ech_db_protocol::value::{Esid, Tx};
 
 use crate::GuestError;
@@ -29,7 +30,7 @@ macro_rules! bind_noop {
     };
 }
 
-bind_noop!(u8, u16, u32, u64, u128, i8, i16, i32, i64, bool, String, Esid, Tx);
+bind_noop!(u8, u16, u32, u64, u128, i8, i16, i32, i64, bool, String, Esid, Tx, Txid);
 
 impl<const LENGTH: usize> Bind for [u8; LENGTH] {
     fn bind<N: Serialize + ?Sized>(&mut self, _name: &N) {}

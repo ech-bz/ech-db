@@ -30,7 +30,7 @@ impl Abi {
                 return Err(PlatformError::reject(Reject::Abi));
             };
             let (params, results) = match import.name() {
-                "map_get" | "map_range" | "tx_get" | "response_copy" => (2, 1),
+                "map_get" | "map_range" | "tx_get" | "tx_get_many" | "response_copy" => (2, 1),
                 "map_insert" | "map_remove" | "abort" | "profile_enter" => (2, 0),
                 "profile_exit" => (0, 0),
                 "read_only" => (0, 1),

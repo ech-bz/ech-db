@@ -34,3 +34,11 @@ pub use ech_db_protocol::value::{
 pub fn load_transaction(txid: &Txid) -> Result<Tx> {
     Ok(bcs::from_bytes(&Host::tx_get(txid))?)
 }
+
+pub fn load_transactions(txids: &[Txid]) -> Result<Vec<Tx>> {
+    let mut values = Vec::with_capacity(txids.len());
+    for bytes in Host::tx_get_many(txids) {
+        values.push(bcs::from_bytes(&bytes)?);
+    }
+    Ok(values)
+}

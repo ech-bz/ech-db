@@ -20,6 +20,7 @@ extern "C" {
     fn map_get(ptr: i32, len: i32) -> i32;
     fn map_range(ptr: i32, len: i32) -> i32;
     fn tx_get(ptr: i32, len: i32) -> i32;
+    fn tx_get_many(ptr: i32, len: i32) -> i32;
     fn response_copy(ptr: i32, capacity: i32) -> i32;
     fn map_insert(ptr: i32, len: i32);
     fn map_remove(ptr: i32, len: i32);
@@ -78,6 +79,15 @@ impl Host {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) fn tx_get_many(txids: &[Txid]) -> Vec<Vec<u8>> {
+        let input = to_bcs_bytes(txids);
+        let response_len = unsafe { tx_get_many(input.as_ptr() as i32, input.len() as i32) };
+        let response = copy_response(response_len as u32 as usize);
+        let values: Vec<ByteBuf> = from_bcs_bytes(&response);
+        values.into_iter().map(ByteBuf::into_vec).collect()
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn abort(bytes: &[u8]) -> ! {
         unsafe { abort(bytes.as_ptr() as i32, bytes.len() as i32) };
         unreachable!("abort must not return")
@@ -121,6 +131,9 @@ impl Host {
         unimplemented!("guest operations require the wasm runtime")
     }
     pub(crate) fn tx_get(_txid: &Txid) -> Vec<u8> {
+        unimplemented!("guest operations require the wasm runtime")
+    }
+    pub(crate) fn tx_get_many(_txids: &[Txid]) -> Vec<Vec<u8>> {
         unimplemented!("guest operations require the wasm runtime")
     }
     pub(crate) fn map_get(_keys: &[MapKey]) -> Vec<Option<Vec<u8>>> {
