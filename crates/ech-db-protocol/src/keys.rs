@@ -1,6 +1,7 @@
 use foundationdb_tuple::{pack, pack_with_versionstamp, Bytes, Versionstamp};
 
 use crate::id::{Root, Txid};
+use crate::value::Esid;
 
 pub struct Prefix;
 
@@ -113,6 +114,44 @@ impl Keys {
             "order",
             "txid",
             Bytes::from(txid.as_bytes()),
+        ))
+    }
+
+    pub fn author_prefix(root: &Root, esid: &Esid) -> Vec<u8> {
+        pack(&(
+            Bytes::from(root.as_bytes()),
+            "author",
+            (
+                Bytes::from(esid.tweak.as_slice()),
+                Bytes::from(esid.c1.as_slice()),
+                Bytes::from(esid.c2.as_slice()),
+            ),
+        ))
+    }
+
+    pub fn author_versionstamp_next(root: &Root, esid: &Esid) -> Vec<u8> {
+        pack_with_versionstamp(&(
+            Bytes::from(root.as_bytes()),
+            "author",
+            (
+                Bytes::from(esid.tweak.as_slice()),
+                Bytes::from(esid.c1.as_slice()),
+                Bytes::from(esid.c2.as_slice()),
+            ),
+            Versionstamp::incomplete(0),
+        ))
+    }
+
+    pub fn author_versionstamp(root: &Root, esid: &Esid, versionstamp: [u8; 10]) -> Vec<u8> {
+        pack(&(
+            Bytes::from(root.as_bytes()),
+            "author",
+            (
+                Bytes::from(esid.tweak.as_slice()),
+                Bytes::from(esid.c1.as_slice()),
+                Bytes::from(esid.c2.as_slice()),
+            ),
+            Versionstamp::complete(versionstamp, 0),
         ))
     }
 }

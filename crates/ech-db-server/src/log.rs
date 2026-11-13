@@ -3,7 +3,7 @@ use bcs::from_bytes;
 use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
 use ech_db_protocol::keys::{Keys, Prefix};
-use ech_db_protocol::value::{Chunks, Record, Tx};
+use ech_db_protocol::value::{Author, Chunks, Esid, Record, Tx};
 
 use crate::error::PlatformError;
 use crate::fdb::{Edit, Reader};
@@ -29,6 +29,7 @@ pub struct History {
     pub dir: Dir,
     pub from: Option<Txid>,
     pub limit: u64,
+    pub esid: Option<Esid>,
 }
 
 pub struct Log;
@@ -85,18 +86,25 @@ impl Log {
         root: &Root,
         history: &History,
     ) -> Result<Vec<Record>, PlatformError> {
-        let prefix = Keys::order_versionstamp_prefix(root);
+        let prefix = match &history.esid {
+            Some(esid) => Keys::author_prefix(root, esid),
+            None => Keys::order_versionstamp_prefix(root),
+        };
         let end = Prefix::successor(&prefix).ok_or_else(PlatformError::integrity)?;
-        let rows = match (history.dir, history.from) {
-            (Dir::Forward, Some(txid)) => {
-                let begin =
-                    Keys::order_versionstamp(root, Self::versionstamp(access, root, &txid).await?);
-                access.scan(&begin, &end, Some(history.limit)).await?
+        let from = match history.from {
+            Some(txid) => {
+                let versionstamp = Self::versionstamp(access, root, &txid).await?;
+                Some(match &history.esid {
+                    Some(esid) => Keys::author_versionstamp(root, esid, versionstamp),
+                    None => Keys::order_versionstamp(root, versionstamp),
+                })
             }
+            None => None,
+        };
+        let rows = match (history.dir, from) {
+            (Dir::Forward, Some(begin)) => access.scan(&begin, &end, Some(history.limit)).await?,
             (Dir::Forward, None) => access.scan(&prefix, &end, Some(history.limit)).await?,
-            (Dir::Backward, Some(txid)) => {
-                let mut after =
-                    Keys::order_versionstamp(root, Self::versionstamp(access, root, &txid).await?);
+            (Dir::Backward, Some(mut after)) => {
                 after.push(0);
                 access
                     .scan_reverse(&prefix, &after, Some(history.limit))
@@ -123,6 +131,7 @@ impl Log {
         edit: &Edit,
         root: &Root,
         txid: &Txid,
+        author: &Author,
         body: &[u8],
         result: &[u8],
     ) -> Result<(), PlatformError> {
@@ -130,6 +139,12 @@ impl Log {
         Self::store_part(edit, Part::Response, root, txid, result)?;
         edit.set_versionstamped_key(&Keys::order_versionstamp_next(root), txid.as_bytes());
         edit.set_versionstamped_value(&Keys::order_txid(root, txid));
+        if let Author::User { esid, .. } = author {
+            edit.set_versionstamped_key(
+                &Keys::author_versionstamp_next(root, esid),
+                txid.as_bytes(),
+            );
+        }
         Ok(())
     }
 

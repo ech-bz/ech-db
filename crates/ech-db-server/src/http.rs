@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use ech_db_protocol::error::Reject;
 use ech_db_protocol::id::{Root, Txid};
-use ech_db_protocol::value::Request;
+use ech_db_protocol::value::{Esid, Request};
 
 use crate::error::PlatformError;
 use crate::log::{Dir, History};
@@ -113,7 +113,25 @@ impl Server {
                 _ => return ApiError::reject(Reject::BadRequest).into_response(),
             },
         };
-        match server.history(root, History { dir, from, limit }).await {
+        let esid = match params.esid.as_deref() {
+            None => None,
+            Some(text) => match text.parse::<Esid>() {
+                Ok(esid) => Some(esid),
+                Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
+            },
+        };
+        match server
+            .history(
+                root,
+                History {
+                    dir,
+                    from,
+                    limit,
+                    esid,
+                },
+            )
+            .await
+        {
             Ok(records) => Self::encoded(&records),
             Err(error) => ApiError::from(error).into_response(),
         }
@@ -132,6 +150,7 @@ struct HistoryQuery {
     dir: Option<String>,
     from: Option<String>,
     limit: Option<String>,
+    esid: Option<String>,
 }
 
 struct ApiError(PlatformError);

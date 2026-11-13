@@ -99,7 +99,7 @@ impl Server {
             return Err(PlatformError::reject(Reject::ResourceLimit));
         }
         let stage_started = Instant::now();
-        Log::store(edit, root, txid, &body, &result)?;
+        Log::store(edit, root, txid, &request.tx.user.author, &body, &result)?;
         let stage_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
         if started.elapsed().as_millis() >= 100 {
             tracing::info!(

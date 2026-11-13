@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +15,22 @@ pub struct Esid {
     pub tweak: [u8; 32],
     pub c1: [u8; 32],
     pub c2: [u8; 32],
+}
+
+impl FromStr for Esid {
+    type Err = ProtocolError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bytes = hex::decode(text).map_err(|_| ProtocolError::Hex)?;
+        Ok(bcs::from_bytes(&bytes)?)
+    }
+}
+
+impl fmt::Display for Esid {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = bcs::to_bytes(self).map_err(|_| fmt::Error)?;
+        formatter.write_str(&hex::encode(bytes))
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
