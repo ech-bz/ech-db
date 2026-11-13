@@ -1,6 +1,8 @@
+use serde::Serialize;
+
 use ech_db_protocol::error::ProtocolError;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Serialize, thiserror::Error)]
 pub enum Error {
     #[error("protocol: {0}")]
     Protocol(#[from] ProtocolError),

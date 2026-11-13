@@ -1,13 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Serialize, thiserror::Error)]
 pub enum ProtocolError {
     #[error("bcs: {0}")]
-    Bcs(#[from] bcs::Error),
+    Bcs(String),
     #[error("invalid hex encoding")]
     Hex,
     #[error("invalid root encoding")]
     Root,
+}
+
+impl From<bcs::Error> for ProtocolError {
+    fn from(error: bcs::Error) -> Self {
+        Self::Bcs(error.to_string())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
