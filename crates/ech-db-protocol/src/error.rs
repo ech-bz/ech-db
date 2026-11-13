@@ -12,20 +12,20 @@ pub enum ProtocolError {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum Reject {
+    UnknownNative { function: String },
+    Application { bytes: Vec<u8> },
     BadRequest,
     BadSignature,
     Duplicate,
     NotFound,
     ProgramNotFound,
     NotAProgram,
-    UnknownNative { function: String },
     Abi,
     InvalidWasm,
     OutOfFuel,
     VmTrap,
     ResourceLimit,
     ReadOnly,
-    Application { bytes: Vec<u8> },
     Integrity,
     Unavailable,
 }

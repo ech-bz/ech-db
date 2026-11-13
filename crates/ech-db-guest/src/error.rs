@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, thiserror::Error)]
 pub enum GuestError {
+    #[error("bcs: {0}")]
+    Bcs(String),
     #[error("unbound collection")]
     Unbound,
     #[error("invalid collection key")]
@@ -10,8 +12,6 @@ pub enum GuestError {
     Limit,
     #[error("invalid collection batch")]
     Batch,
-    #[error("bcs: {0}")]
-    Bcs(String),
 }
 
 impl From<bcs::Error> for GuestError {
