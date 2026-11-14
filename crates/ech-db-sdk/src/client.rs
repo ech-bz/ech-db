@@ -45,16 +45,18 @@ impl Client {
         ctx: Vec<u8>,
         call: Call,
         tweak: [u8; 32],
+        nonce: [u8; 32],
     ) -> Result<UserPart, Error> {
         let (x, r) = self.scalars(root, tweak)?;
         let esid = self.esid(root, tweak)?;
         let statement = Statement::user(root, &esid);
-        let context = UserPart::context(root, &tweak, &ctx, &call)?;
+        let context = UserPart::context(root, &tweak, &nonce, &ctx, &call)?;
         let alpha = Self::random()?;
         let beta = Self::random()?;
         let proof = Proof::prove(b"user", &statement, &context, &[x, r], &[alpha, beta])
             .ok_or(Error::Proof)?;
         Ok(UserPart {
+            nonce,
             ctx,
             call,
             author: Author::User { esid, proof },

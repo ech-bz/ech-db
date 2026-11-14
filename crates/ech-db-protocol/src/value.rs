@@ -55,6 +55,7 @@ pub enum Author {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct UserPart {
+    pub nonce: [u8; 32],
     #[serde(with = "serde_bytes")]
     pub ctx: Vec<u8>,
     pub call: Call,
@@ -62,8 +63,14 @@ pub struct UserPart {
 }
 
 impl UserPart {
-    pub fn context(root: &Root, tweak: &[u8; 32], ctx: &[u8], call: &Call) -> Result<Vec<u8>, ProtocolError> {
-        bcs::to_bytes(&(root, tweak, ctx, call)).map_err(ProtocolError::from)
+    pub fn context(
+        root: &Root,
+        tweak: &[u8; 32],
+        nonce: &[u8; 32],
+        ctx: &[u8],
+        call: &Call,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        bcs::to_bytes(&(root, tweak, nonce, ctx, call)).map_err(ProtocolError::from)
     }
 }
 
@@ -98,7 +105,7 @@ impl Tx {
                 return Err(Reject::BadSignature);
             }
             let statement = Statement::user(root, esid);
-            let context = UserPart::context(root, &esid.tweak, &self.user.ctx, &self.user.call)
+            let context = UserPart::context(root, &esid.tweak, &self.user.nonce, &self.user.ctx, &self.user.call)
                 .map_err(|_| Reject::BadRequest)?;
             proof.verify(b"user", &statement, &context)?;
         }
