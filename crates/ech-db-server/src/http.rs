@@ -21,7 +21,7 @@ const CONTENT_TYPE: &str = "application/octet-stream";
 
 impl Server {
     pub const BODY_LIMIT: usize = 12 * 1024 * 1024;
-    pub const MAX_LIMIT: u64 = 64;
+    pub const MAX_LIMIT: u64 = 1024;
 
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
