@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use bcs::{from_bytes, to_bytes};
 use futures::channel::{mpsc, oneshot};
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::future::try_join_all;
+use futures::StreamExt;
 use tracing::Instrument;
 use wasmtime::{Caller, Engine, Linker, Memory, Module, Store, Trap};
 
@@ -17,8 +18,6 @@ use crate::fdb::{Mutator, Reader};
 use crate::log::Log;
 use crate::timing::{self, Timer};
 use crate::wasm::{Profile, ProfileLimiter};
-
-const CONCURRENT_READS: usize = 64;
 
 pub struct Executor {
     engine: Engine,
@@ -145,47 +144,39 @@ impl Executor {
             Pending::Get(keys) => {
                 let started = Instant::now();
                 let read = Timer::new("db_get");
-                let reads: Vec<_> = keys
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, key)| {
-                        let key = BigMap::physical(root, &key);
-                        async move {
-                            let issued = Instant::now();
-                            let value = access.get(&key).await?;
-                            Ok::<_, PlatformError>((
-                                index,
-                                value,
-                                issued.elapsed(),
-                                issued.duration_since(started),
-                            ))
-                        }
-                    })
-                    .collect();
-                let count = reads.len();
-                let (values, total, longest, last_issued) = async {
-                    let mut reads = stream::iter(reads).buffer_unordered(CONCURRENT_READS);
-                    let mut values = vec![None; count];
-                    let mut total = Duration::ZERO;
-                    let mut longest = Duration::ZERO;
-                    let mut last_issued = Duration::ZERO;
-                    while let Some((index, value, elapsed, issued)) = reads.try_next().await? {
-                        total += elapsed;
-                        longest = longest.max(elapsed);
-                        last_issued = last_issued.max(issued);
-                        values[index] = value;
+                let count = keys.len();
+                let reads = keys.into_iter().enumerate().map(|(index, key)| {
+                    let key = BigMap::physical(root, &key);
+                    async move {
+                        let issued = Instant::now();
+                        let value = access.get(&key).await?;
+                        Ok::<_, PlatformError>((
+                            index,
+                            value,
+                            issued.elapsed(),
+                            issued.duration_since(started),
+                        ))
                     }
-                    Ok::<_, PlatformError>((values, total, longest, last_issued))
+                });
+                let results = try_join_all(reads)
+                    .instrument(
+                        tracing::debug_span!(target: "latency", "fdb.get_batch", keys = count),
+                    )
+                    .await?;
+                let mut values = vec![None; count];
+                let mut total = Duration::ZERO;
+                let mut longest = Duration::ZERO;
+                let mut last_issued = Duration::ZERO;
+                for (index, value, elapsed, issued) in results {
+                    values[index] = value;
+                    total += elapsed;
+                    longest = longest.max(elapsed);
+                    last_issued = last_issued.max(issued);
                 }
-                .instrument(
-                    tracing::debug_span!(target: "latency", "fdb.get_batch", keys = count,
-                        concurrency = CONCURRENT_READS),
-                )
-                .await?;
                 let found = values.iter().flatten().count();
                 let bytes: usize = values.iter().flatten().map(Vec::len).sum();
                 read.finish(format!(
-                    "keys={count} found={found} bytes={bytes} concurrency={CONCURRENT_READS} avg_ms={:.3} max_ms={:.3} last_issue_ms={:.3}",
+                    "keys={count} found={found} bytes={bytes} avg_ms={:.3} max_ms={:.3} last_issue_ms={:.3}",
                     total.as_secs_f64() * 1000.0 / count.max(1) as f64,
                     longest.as_secs_f64() * 1000.0,
                     last_issued.as_secs_f64() * 1000.0,
@@ -272,10 +263,10 @@ impl Executor {
             }
             Pending::TxMany(txids) => {
                 let read = Timer::new("db_txs");
-                let mut values = Vec::with_capacity(txids.len());
-                for txid in &txids {
-                    values.push(Log::body(access, root, txid).await?);
-                }
+                let count = txids.len();
+                let values = try_join_all(txids.iter().map(|txid| Log::body(access, root, txid)))
+                    .instrument(tracing::debug_span!(target: "latency", "fdb.txs", count = count))
+                    .await?;
                 drop(read);
                 let encode = Timer::new("db_host_encode");
                 let bytes = to_bytes(&values).map_err(|_| PlatformError::integrity())?;
