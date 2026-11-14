@@ -1,5 +1,5 @@
 use ech_db_protocol::error::Reject;
-use ech_db_protocol::id::{Root, Txid};
+use ech_db_protocol::id::Root;
 use ech_db_protocol::value::{Chunks, Outcome, Program, Request};
 use tracing::Instrument;
 
@@ -9,22 +9,27 @@ use crate::server::Server;
 use crate::timing::{self, Timer};
 
 impl Server {
-    pub async fn query(&self, root: Root, request: Request) -> Result<Outcome, PlatformError> {
-        let txid = request
-            .tx
-            .txid(&root)
-            .map_err(|_| PlatformError::reject(Reject::BadRequest))?;
-        tracing::Span::current().record("txid", tracing::field::display(txid));
+    #[tracing::instrument(target = "latency", level = "debug", name = "db.query", skip_all,
+        fields(root = %root, requests = requests.len()))]
+    pub async fn query(
+        &self,
+        root: Root,
+        requests: Vec<Request>,
+    ) -> Result<Vec<Outcome>, PlatformError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut view = self.db.view()?;
         let mut attempt = 0;
         loop {
             attempt += 1;
             match self
-                .apply_query(&view, &root, txid, &request)
-                .instrument(tracing::debug_span!(target: "latency", "query.attempt", attempt))
+                .apply_query(&view, &root, &requests)
+                .instrument(tracing::debug_span!(target: "latency", "query.attempt",
+                    attempt, requests = requests.len()))
                 .await
             {
-                Ok(outcome) => return Ok(outcome),
+                Ok(outcomes) => return Ok(outcomes),
                 Err(PlatformError::Reject(reject)) => return Err(PlatformError::Reject(reject)),
                 Err(PlatformError::Fdb(error)) => {
                     view = timing::measure_async("db_retry", view.retry(error)).await?;
@@ -37,22 +42,36 @@ impl Server {
         &self,
         view: &View,
         root: &Root,
-        txid: Txid,
-        request: &Request,
-    ) -> Result<Outcome, PlatformError> {
+        requests: &[Request],
+    ) -> Result<Vec<Outcome>, PlatformError> {
         let _attempt = Timer::new("db_attempt");
         let verify = Timer::new("db_verify");
-        tracing::debug_span!(target: "latency", "query.verify")
-            .in_scope(|| request.verify(root))
-            .map_err(PlatformError::Reject)?;
+        tracing::debug_span!(target: "latency", "query.verify", requests = requests.len())
+            .in_scope(|| {
+                requests
+                    .iter()
+                    .try_for_each(|request| request.verify(root))
+                    .map_err(PlatformError::Reject)
+            })?;
         drop(verify);
-        if matches!(request.tx.user.call.program, Program::Txid(_)) {
+        if requests
+            .iter()
+            .any(|request| matches!(request.tx.user.call.program, Program::Txid(_)))
+        {
             timing::measure_async("db_grv", view.read_version()).await?;
         }
-        let result = self.execute(view, root, &txid, request).await?;
-        if result.len() > Chunks::MAX_RESULT {
-            return Err(PlatformError::reject(Reject::ResourceLimit));
+        let mut outcomes = Vec::with_capacity(requests.len());
+        for request in requests {
+            let txid = request
+                .tx
+                .txid(root)
+                .map_err(|_| PlatformError::reject(Reject::BadRequest))?;
+            let result = self.execute(view, root, &txid, request).await?;
+            if result.len() > Chunks::MAX_RESULT {
+                return Err(PlatformError::reject(Reject::ResourceLimit));
+            }
+            outcomes.push(Outcome { txid, result });
         }
-        Ok(Outcome { txid, result })
+        Ok(outcomes)
     }
 }

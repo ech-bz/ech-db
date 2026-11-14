@@ -44,19 +44,18 @@ impl Server {
             Ok(root) => root,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
-        let request = match bcs::from_bytes::<Request>(&body) {
-            Ok(request) => request,
+        let requests = match bcs::from_bytes::<Vec<Request>>(&body) {
+            Ok(requests) => requests,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
-        match server.append(root, request).await {
-            Ok(outcome) => Self::encoded(&outcome),
+        match server.append(root, requests).await {
+            Ok(outcomes) => Self::encoded(&outcomes),
             Err(error) => ApiError::from(error).into_response(),
         }
     }
 
     #[tracing::instrument(target = "latency", level = "debug", name = "query.server", skip_all,
-        fields(root = %root, txid = tracing::field::Empty, function = tracing::field::Empty,
-            input_bytes = body.len()))]
+        fields(root = %root, requests = tracing::field::Empty, input_bytes = body.len()))]
     async fn query_request(
         State(server): State<Arc<Server>>,
         Path(root): Path<String>,
@@ -68,20 +67,26 @@ impl Server {
             Ok(root) => root,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
-        let request = match tracing::debug_span!(target: "latency", "query.decode_request")
-            .in_scope(|| bcs::from_bytes::<Request>(&body))
+        let requests = match tracing::debug_span!(target: "latency", "query.decode_request")
+            .in_scope(|| bcs::from_bytes::<Vec<Request>>(&body))
         {
-            Ok(request) => request,
+            Ok(requests) => requests,
             Err(_) => return ApiError::reject(Reject::BadRequest).into_response(),
         };
-        tracing::Span::current().record("function", &request.tx.user.call.function);
+        tracing::Span::current().record("requests", requests.len());
         drop(decode);
-        let outcome = server.query(root, request).await;
+        let outcome = server.query(root, requests).await;
         let _encode = Timer::new("db_encode");
         match outcome {
-            Ok(outcome) => tracing::debug_span!(target: "latency", "query.encode_response",
-                result_bytes = outcome.result.len())
-            .in_scope(|| Self::encoded(&outcome)),
+            Ok(outcomes) => {
+                let bytes = outcomes
+                    .iter()
+                    .map(|outcome| outcome.result.len())
+                    .sum::<usize>();
+                tracing::debug_span!(target: "latency", "query.encode_response",
+                    result_bytes = bytes)
+                .in_scope(|| Self::encoded(&outcomes))
+            }
             Err(error) => ApiError::from(error).into_response(),
         }
     }

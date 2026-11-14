@@ -95,8 +95,8 @@ impl Log {
             Some(txid) => {
                 let versionstamp = Self::versionstamp(access, root, &txid).await?;
                 Some(match &history.esid {
-                    Some(esid) => Keys::author_versionstamp(root, esid, versionstamp),
-                    None => Keys::order_versionstamp(root, versionstamp),
+                    Some(esid) => Keys::author_versionstamp(root, esid, versionstamp, 0),
+                    None => Keys::order_versionstamp(root, versionstamp, 0),
                 })
             }
             None => None,
@@ -134,15 +134,16 @@ impl Log {
         author: &Author,
         body: &[u8],
         result: &[u8],
+        index: u16,
     ) -> Result<(), PlatformError> {
         Self::store_part(edit, Part::Body, root, txid, body)?;
         Self::store_part(edit, Part::Response, root, txid, result)?;
-        edit.set_versionstamped_key(&Keys::order_versionstamp_next(root), txid.as_bytes());
+        edit.set_versionstamped_key(&Keys::order_versionstamp_next(root, index), txid.as_bytes());
         edit.set_versionstamped_value(&Keys::order_txid(root, txid));
         if let Author::User { esid, .. } = author {
             edit.add(&Keys::author_length(root, esid), 1);
             edit.set_versionstamped_key(
-                &Keys::author_versionstamp_next(root, esid),
+                &Keys::author_versionstamp_next(root, esid, index),
                 txid.as_bytes(),
             );
         }

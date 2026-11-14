@@ -90,21 +90,21 @@ impl Keys {
         pack(&(Bytes::from(root.as_bytes()), "order", "versionstamp"))
     }
 
-    pub fn order_versionstamp_next(root: &Root) -> Vec<u8> {
+    pub fn order_versionstamp_next(root: &Root, index: u16) -> Vec<u8> {
         pack_with_versionstamp(&(
             Bytes::from(root.as_bytes()),
             "order",
             "versionstamp",
-            Versionstamp::incomplete(0),
+            Versionstamp::incomplete(index),
         ))
     }
 
-    pub fn order_versionstamp(root: &Root, versionstamp: [u8; 10]) -> Vec<u8> {
+    pub fn order_versionstamp(root: &Root, versionstamp: [u8; 10], index: u16) -> Vec<u8> {
         pack(&(
             Bytes::from(root.as_bytes()),
             "order",
             "versionstamp",
-            Versionstamp::complete(versionstamp, 0),
+            Versionstamp::complete(versionstamp, index),
         ))
     }
 
@@ -143,7 +143,7 @@ impl Keys {
         ))
     }
 
-    pub fn author_versionstamp_next(root: &Root, esid: &Esid) -> Vec<u8> {
+    pub fn author_versionstamp_next(root: &Root, esid: &Esid, index: u16) -> Vec<u8> {
         pack_with_versionstamp(&(
             Bytes::from(root.as_bytes()),
             "author",
@@ -153,11 +153,16 @@ impl Keys {
                 Bytes::from(esid.c2.as_slice()),
             ),
             "entries",
-            Versionstamp::incomplete(0),
+            Versionstamp::incomplete(index),
         ))
     }
 
-    pub fn author_versionstamp(root: &Root, esid: &Esid, versionstamp: [u8; 10]) -> Vec<u8> {
+    pub fn author_versionstamp(
+        root: &Root,
+        esid: &Esid,
+        versionstamp: [u8; 10],
+        index: u16,
+    ) -> Vec<u8> {
         pack(&(
             Bytes::from(root.as_bytes()),
             "author",
@@ -167,7 +172,7 @@ impl Keys {
                 Bytes::from(esid.c2.as_slice()),
             ),
             "entries",
-            Versionstamp::complete(versionstamp, 0),
+            Versionstamp::complete(versionstamp, index),
         ))
     }
 }
