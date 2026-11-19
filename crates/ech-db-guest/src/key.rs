@@ -1,3 +1,4 @@
+use ech_db_protocol::id::Txid;
 use ech_db_protocol::value::Esid;
 
 pub trait Key: Sized {
@@ -23,6 +24,16 @@ impl<const N: usize> Key for [u8; N] {
 
     fn decode(bytes: &[u8]) -> Option<Self> {
         bytes.try_into().ok()
+    }
+}
+
+impl Key for Txid {
+    fn encode(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Txid::from_slice(bytes)
     }
 }
 
